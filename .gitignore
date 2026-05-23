@@ -1,0 +1,33 @@
+# Data — never commit raw/processed medical images
+data/raw/
+data/processed/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights (commit only best_model.pth explicitly)
+models/*.pth
+!models/best_model.pth
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Env vars
+.env

@@ -1,0 +1,28 @@
+# PyTorch — sem pin de versão para compatibilidade com Python 3.13
+torch
+torchvision
+
+# Medical imaging
+nibabel>=5.2.0
+pydicom>=2.4.0
+
+# Numerics / ML
+numpy>=1.26.0
+scipy>=1.13.0
+scikit-learn>=1.4.0
+pandas>=2.0.0
+
+# Visualization
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# API
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+pydantic>=2.7.0
+
+# Utilities
+tqdm>=4.66.0
+pillow>=10.3.0
+connected-components-3d>=3.12.0
