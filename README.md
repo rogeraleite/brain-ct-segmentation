@@ -146,10 +146,12 @@ Expected time: ~40–60 min on M-series Mac | ~2–4h on CPU.
 
 | Metric | Value |
 |---|---|
-| Val Dice | _fill after training_ |
-| Val Loss | _fill after training_ |
-| Epochs | 50 |
+| Val Dice | 0.272 |
+| Val Loss | 0.991 |
+| Best epoch | 46 / 50 |
 | Best checkpoint | models/best_model.pth |
+| Training device | Apple Silicon MPS |
+| Training time | ~55 min |
 
 Training curves and sample predictions are in [`notebooks/03_model_training.ipynb`](notebooks/03_model_training.ipynb).
 

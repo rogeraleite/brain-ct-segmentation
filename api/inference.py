@@ -5,6 +5,8 @@ compute derived metrics (volume + hemisphere lateralization).
 
 import base64
 import io
+import os
+import tempfile
 
 import nibabel as nib
 import numpy as np
@@ -96,7 +98,7 @@ def predict_from_bytes(
     End-to-end inference from raw file bytes to structured result.
 
     Steps:
-      1. Parse NIfTI from bytes (no temp file)
+      1. Parse NIfTI from bytes
       2. Preprocess (brain window + normalize + resize)
       3. Model forward pass
       4. Threshold → binary mask
@@ -105,16 +107,21 @@ def predict_from_bytes(
 
     Returns dict matching SegmentationResponse schema.
     """
-    # 1. Load NIfTI from in-memory bytes
-    fh = nib.FileHolder(fileobj=io.BytesIO(file_bytes))
-    img = nib.Nifti1Image.from_file_map({"header": fh, "image": fh})
+    # 1. Load NIfTI — nibabel's FileHolder doesn't handle gzip in-memory,
+    #    so we write to a temp file (works for both .nii and .nii.gz)
+    suffix = ".nii.gz" if file_bytes[:2] == b"\x1f\x8b" else ".nii"
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        os.write(tmp_fd, file_bytes)
+        os.close(tmp_fd)
+        img = nib.load(tmp_path)
+        volume = img.get_fdata().astype(np.float32)
+        spacing_mm = np.abs(np.diag(img.affine)[:3])[::-1].copy()
+    finally:
+        os.unlink(tmp_path)
 
-    volume = img.get_fdata().astype(np.float32)
     if volume.ndim == 3:
         volume = np.transpose(volume, (2, 0, 1))  # (H,W,D) → (D,H,W)
-
-    # Extract voxel spacing from affine for physical volume calculation
-    spacing_mm = np.abs(np.diag(img.affine)[:3])[::-1].copy()  # (D_sp, H_sp, W_sp)
 
     # 2. Preprocess
     volume_pp, _ = preprocess(volume, np.zeros_like(volume, dtype=np.uint8))
