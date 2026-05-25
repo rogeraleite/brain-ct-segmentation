@@ -100,33 +100,47 @@ def train(
     lr: float,
     save_path: str,
     device: torch.device,
+    save_by: str = "dice",
 ) -> dict:
     """
-    Train model, save best checkpoint by val Dice.
+    Train model, save best checkpoint.
+
+    save_by:
+      "dice" — save when val_dice improves (default, good for full-volume eval)
+      "loss" — save when val_loss improves (better for patch-based eval where
+               empty patches inflate dice to 1.0 artificially)
 
     Returns history dict with lists: train_loss, val_loss, val_dice.
     """
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    # Scheduler mode depends on criterion: maximise dice or minimise loss
+    sched_mode = "max" if save_by == "dice" else "min"
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=5
+        optimizer, mode=sched_mode, factor=0.5, patience=5
     )
 
     history: dict[str, list[float]] = {"train_loss": [], "val_loss": [], "val_dice": []}
     best_dice = 0.0
+    best_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
         train_loss = train_one_epoch(model, train_loader, optimizer, device)
         val_loss, val_dice = evaluate(model, val_loader, device)
 
-        scheduler.step(val_dice)
+        scheduler.step(val_dice if save_by == "dice" else val_loss)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["val_dice"].append(val_dice)
 
+        improved = (save_by == "dice" and val_dice > best_dice) or \
+                   (save_by == "loss" and val_loss < best_loss)
+
         flag = ""
-        if val_dice > best_dice:
+        if improved:
             best_dice = val_dice
+            best_loss = val_loss
             torch.save(
                 {
                     "epoch": epoch,
@@ -145,5 +159,6 @@ def train(
             f"val_dice={val_dice:.4f}{flag}"
         )
 
-    print(f"\nTraining complete. Best val Dice: {best_dice:.4f}")
+    best_label = f"val_loss={best_loss:.4f}" if save_by == "loss" else f"val_dice={best_dice:.4f}"
+    print(f"\nTraining complete. Best {best_label}  (save_by='{save_by}')")
     return history

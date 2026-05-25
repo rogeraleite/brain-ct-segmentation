@@ -83,6 +83,7 @@ def main() -> None:
         lr=args.lr,
         save_path=args.save_path,
         device=device,
+        save_by="loss",  # val_dice inflated by empty patches — use loss as criterion
     )
 
     try:
