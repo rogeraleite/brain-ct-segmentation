@@ -15,7 +15,7 @@ import torch
 from src.models.unet import Small3DUNet
 from src.preprocessing.transforms import preprocess, TARGET_SHAPE
 
-MODEL_PATH = "models/best_model.pth"
+MODEL_PATH = "models/best_model_small3DUNet.pth"
 
 
 # ── Model loading ──────────────────────────────────────────────────────────────

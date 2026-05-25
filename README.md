@@ -25,7 +25,7 @@ NIfTI file (.nii.gz)
         │
         ▼
 [trainer.py]         Dice + BCE combined loss | AdamW | ReduceLROnPlateau
-                     → best_model.pth (saved by val Dice)
+                     → best_model_small3DUNet.pth (saved by val Dice)
         │
         ▼
 [FastAPI /segment]   POST .nii.gz → {
@@ -61,7 +61,7 @@ curl -X POST http://localhost:8000/segment \
 open http://localhost:8000/docs
 ```
 
-> The container expects `models/best_model.pth` to be present.  
+> The container expects `models/best_model_small3DUNet.pth` to be present.  
 > See **Training** below to produce it, or download a pre-trained checkpoint.
 
 ---
@@ -131,7 +131,7 @@ pip install -r requirements.txt
 
 python scripts/train.py \
   --data-root data/raw \
-  --save-path models/best_model.pth \
+  --save-path models/best_model_small3DUNet.pth \
   --epochs 50 \
   --batch-size 2 \
   --lr 1e-3
@@ -149,7 +149,7 @@ Expected time: ~40–60 min on M-series Mac | ~2–4h on CPU.
 | Val Dice | 0.272 |
 | Val Loss | 0.991 |
 | Best epoch | 46 / 50 |
-| Best checkpoint | models/best_model.pth |
+| Best checkpoint | models/best_model_small3DUNet.pth |
 | Training device | Apple Silicon MPS |
 | Training time | ~55 min |
 

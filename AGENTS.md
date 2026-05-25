@@ -10,7 +10,7 @@ O repositório Git válido é esta pasta: `medical-imaging-portfolio/`. A pasta 
 
 - Leia `README.md` e `docs/PROJECT_MAP.md` para entender o fluxo principal.
 - Rode `git status --short` e preserve qualquer mudança local existente.
-- Não sobrescreva `models/best_model.pth` sem pedido explícito — ele é o checkpoint usado pela API e pode ser caro de recriar (50 epochs, ~40–60min no Apple Silicon).
+- Não sobrescreva `models/best_model_small3DUNet.pth` sem pedido explícito — ele é o checkpoint usado pela API e pode ser caro de recriar (50 epochs, ~40–60min no Apple Silicon).
 - Não altere nem versione dados em `data/raw/` ou `data/processed/`.
 - Trate notebooks como artefatos de exploração; coloque lógica reutilizável em `src/`, `api/` ou `scripts/`.
 - Prefira mudanças pequenas, alinhadas à estrutura atual do projeto.
@@ -40,11 +40,11 @@ PYTHONPATH=. uvicorn api.main:app --reload --port 8000
 ### Docker
 
 ```bash
-# Requer models/best_model.pth presente antes do build
+# Requer models/best_model_small3DUNet.pth presente antes do build
 docker compose up --build
 ```
 
-> O Dockerfile copia `models/best_model.pth` em tempo de build (linha 15). Se o arquivo não existir, o build falha.
+> O Dockerfile copia `models/best_model_small3DUNet.pth` em tempo de build (linha 15). Se o arquivo não existir, o build falha.
 
 ### Health check
 
@@ -67,7 +67,7 @@ curl -X POST http://localhost:8000/segment \
 ```bash
 python scripts/train.py \
   --data-root data/raw \
-  --save-path models/best_model.pth \
+  --save-path models/best_model_small3DUNet.pth \
   --epochs 50 \
   --batch-size 2 \
   --lr 1e-3 \
@@ -128,8 +128,8 @@ curl http://localhost:8000/health
 ## Cuidados Com Artefatos Grandes E Sensíveis
 
 - `data/raw/` e `data/processed/` podem conter imagens médicas e devem continuar fora do versionamento (`.gitignore` cobre ambos).
-- `models/best_model.pth` é o checkpoint esperado pela API — único `.pth` comitado (os demais estão ignorados pelo `.gitignore` com exceção explícita).
-- `models/best_model.pth` contém `{epoch, model_state_dict, val_dice, val_loss}` — não substitua por um checkpoint de estrutura diferente sem atualizar `api/inference.py`.
+- `models/best_model_small3DUNet.pth` é o checkpoint esperado pela API — único `.pth` comitado (os demais estão ignorados pelo `.gitignore` com exceção explícita).
+- `models/best_model_small3DUNet.pth` contém `{epoch, model_state_dict, val_dice, val_loss}` — não substitua por um checkpoint de estrutura diferente sem atualizar `api/inference.py`.
 - Evite rodar treino ou pré-processamento completo como validação padrão — depende de dados locais e pode demorar horas.
 - `batch_size=1` quebra o `BatchNorm3d` — use mínimo 2.
 
@@ -140,7 +140,7 @@ curl http://localhost:8000/health
 - **PYTHONPATH**: Localmente, sempre `PYTHONPATH=.`. No Docker, já está definido como `ENV PYTHONPATH=/app`.
 - **Emparelhamento de dados**: `build_index()` emparelha `images/` e `masks/` por ordem alfabética. Nomes de arquivo devem ser idênticos nos dois diretórios.
 - **Augmentation**: O `BrainCTDataset` flipa apenas no eixo de profundidade (D). Nunca flipa H/W — isso confundiria a detecção de lateralidade (hemisférios), que depende do eixo W.
-- **MODEL_PATH em `api/inference.py`**: Hardcoded como `"models/best_model.pth"` (relativo ao CWD). Rode a API sempre da raiz do projeto.
+- **MODEL_PATH em `api/inference.py`**: Hardcoded como `"models/best_model_small3DUNet.pth"` (relativo ao CWD). Rode a API sempre da raiz do projeto.
 - **Se modelo não encontrado na startup**: A API sobe normalmente, mas `/segment` retorna 503. O log avisa com `Model file not found`.
 - **`trainer.py` tem mudança local não comitada**: Remoção de `verbose=True` do `ReduceLROnPlateau` (deprecated no PyTorch atual). Não reverta essa mudança.
 

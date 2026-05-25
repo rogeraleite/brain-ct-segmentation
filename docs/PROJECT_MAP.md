@@ -22,7 +22,7 @@ dataset.py         BrainCTDataset → (float32 [1,D,H,W], float32 [1,D,H,W])
 unet.py            Small3DUNet → sigmoid output (B,1,64,128,128)
   ↓
 trainer.py         Dice + BCE loss | AdamW lr=1e-3 | ReduceLROnPlateau
-                   salva best_model.pth por val Dice
+                   salva best_model_small3DUNet.pth por val Dice
   ↓
 api/inference.py   predict_from_bytes → threshold 0.5 → máscara binária
                    volume_ml = voxels × voxel_mm³ / 1000
@@ -130,7 +130,7 @@ Cada bloco `_conv_block` = Conv3d → BN → ReLU → Conv3d → BN → ReLU (se
 ### Inferência e API — `api/`
 
 **`api/inference.py`**
-- `MODEL_PATH = "models/best_model.pth"` — relativo ao CWD; deve rodar da raiz do projeto
+- `MODEL_PATH = "models/best_model_small3DUNet.pth"` — relativo ao CWD; deve rodar da raiz do projeto
 - `load_model(model_path)` → `(Small3DUNet, device)` — chamado uma vez na startup via lifespan
 - `predict_from_bytes(file_bytes, model, device, threshold=0.5)` → dict
   - Carrega NIfTI de bytes em memória (sem arquivo temporário, usando `nib.FileHolder`)
@@ -146,7 +146,7 @@ Cada bloco `_conv_block` = Conv3d → BN → ReLU → Conv3d → BN → ReLU (se
 
 **`api/main.py`**
 - Lifespan: carrega modelo na startup, limpa estado no shutdown
-- Se `best_model.pth` não existir: API sobe mas `/segment` retorna 503
+- Se `best_model_small3DUNet.pth` não existir: API sobe mas `/segment` retorna 503
 - Limite de upload: 500 MB
 - Aceita apenas `.nii` e `.nii.gz` — outros formatos retornam 400
 
@@ -181,7 +181,7 @@ Notebooks são artefatos de exploração e documentação — não são fonte de
 
 - **Sem testes automatizados**: `tests/` existe mas está vazio. Não há pytest, não há CI.
 - **Dependência de dados locais**: `data/raw/` não está no repositório. O pipeline não funciona sem os dados baixados separadamente.
-- **Dependência do checkpoint**: A API falha com 503 sem `models/best_model.pth`. O Docker build falha sem ele.
+- **Dependência do checkpoint**: A API falha com 503 sem `models/best_model_small3DUNet.pth`. O Docker build falha sem ele.
 - **Volume calibrado no espaço redimensionado**: A inferência calcula volume com o voxel spacing reescalonado para TARGET_SHAPE — não na resolução original. Para uso clínico, seria necessário inferência em resolução nativa (sliding window).
 - **Lateralização assume orientação axial padrão**: Depende do eixo W ser L/R. Aquisições oblíquas exigiriam `nibabel.as_closest_canonical`.
 - **Máscaras multi-classe colapsadas para binário**: O dataset GTS.ai tem 10 classes de patologia — o projeto usa apenas lesão/fundo.
@@ -208,7 +208,7 @@ Notebooks são artefatos de exploração e documentação — não são fonte de
 ## Artefatos Sensíveis
 
 - `data/` contém dados médicos locais. Não adicionar arquivos de imagem ao Git.
-- `models/best_model.pth` é o checkpoint usado pela API. Não sobrescrever sem confirmação explícita.
+- `models/best_model_small3DUNet.pth` é o checkpoint usado pela API. Não sobrescrever sem confirmação explícita.
 - `.venv/`, caches Python e checkpoints temporários devem permanecer fora do versionamento.
 - `trainer.py` tem mudança local não comitada (remoção de `verbose=True` do `ReduceLROnPlateau`). Não reverta.
 

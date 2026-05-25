@@ -5,6 +5,7 @@ class HealthResponse(BaseModel):
     status: str
     model_loaded: bool
     device: str
+    model_sw_loaded: bool = False
 
 
 class SegmentationResponse(BaseModel):

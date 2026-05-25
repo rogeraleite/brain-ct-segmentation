@@ -17,9 +17,10 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 
-# Model weights (commit only best_model.pth explicitly)
+# Model weights (commit trained checkpoints explicitly)
 models/*.pth
-!models/best_model.pth
+!models/best_model_small3DUNet.pth
+!models/best_model_slidingWindow.pth
 
 # OS
 .DS_Store
