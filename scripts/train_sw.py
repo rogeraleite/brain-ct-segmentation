@@ -42,12 +42,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data-root",  default="data/raw")
     parser.add_argument("--save-path",  default="models/best_model_slidingWindow.pth")
-    parser.add_argument("--epochs",     type=int,   default=50)
+    parser.add_argument("--epochs",     type=int,   default=100)
     parser.add_argument("--batch-size", type=int,   default=2)
     parser.add_argument("--lr",         type=float, default=1e-3)
     parser.add_argument("--val-split",  type=float, default=0.2)
     parser.add_argument("--seed",       type=int,   default=42)
     parser.add_argument("--no-augment", action="store_true")
+    parser.add_argument("--pos-weight", type=float, default=50.0)
     return parser.parse_args()
 
 
@@ -75,6 +76,7 @@ def main() -> None:
     print(f"Model params: {model.count_parameters():,}")
 
     Path(args.save_path).parent.mkdir(parents=True, exist_ok=True)
+    print(f"pos_weight  : {args.pos_weight}  (lesion voxels weighted {args.pos_weight:.0f}× in BCE)")
     history = train(
         model=model,
         train_loader=train_loader,
@@ -83,7 +85,8 @@ def main() -> None:
         lr=args.lr,
         save_path=args.save_path,
         device=device,
-        save_by="loss",  # val_dice inflated by empty patches — use loss as criterion
+        save_by="loss",
+        pos_weight=args.pos_weight,
     )
 
     try:

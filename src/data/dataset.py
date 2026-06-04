@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.data.loader import load_nifti
-from src.preprocessing.transforms import preprocess, TARGET_SHAPE
+from src.preprocessing.transforms import augment_pair, preprocess, TARGET_SHAPE
 
 
 class BrainCTDataset(Dataset):
@@ -41,13 +41,12 @@ class BrainCTDataset(Dataset):
 
         volume, mask = preprocess(volume, mask, self.target_shape)
 
+        if self.augment:
+            volume, mask = augment_pair(volume, mask)
+
         x = torch.from_numpy(volume).unsqueeze(0)          # (1, D, H, W)
         y = torch.from_numpy(mask).float().unsqueeze(0)    # (1, D, H, W)
 
         assert torch.isfinite(x).all(), f"Non-finite values in volume: {r['image']}"
-
-        if self.augment and torch.rand(1).item() > 0.5:
-            x = torch.flip(x, dims=[1])
-            y = torch.flip(y, dims=[1])
 
         return x, y

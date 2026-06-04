@@ -1,6 +1,8 @@
 # Data — never commit raw/processed medical images
 data/raw/
 data/processed/
+# Sample scan is committed (2.6MB, anonymised, used as built-in demo)
+!data/sample/
 
 # Virtual environment
 .venv/
@@ -21,6 +23,7 @@ __pycache__/
 models/*.pth
 !models/best_model_small3DUNet.pth
 !models/best_model_slidingWindow.pth
+!models/best_model_slidingWindow_v5.pth
 
 # OS
 .DS_Store

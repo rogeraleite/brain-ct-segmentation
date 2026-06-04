@@ -17,14 +17,22 @@ def dice_loss(pred: torch.Tensor, target: torch.Tensor, smooth: float = 1e-5) ->
     return 1.0 - (2.0 * intersection + smooth) / (pred_flat.sum() + target_flat.sum() + smooth)
 
 
-def combined_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def combined_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    pos_weight: float = 1.0,
+) -> torch.Tensor:
     """
     Dice + BCE combined loss.
-    BCE alone can diverge on class-imbalanced masks (brain lesions are sparse).
-    Dice alone can be unstable early in training when predictions are near 0.5.
-    Combined gives stable gradients throughout.
+    pos_weight > 1.0 upweights lesion voxels in BCE to counter class imbalance.
+    Equivalent to BCEWithLogitsLoss(pos_weight=...) but works on sigmoid outputs.
     """
-    bce = nn.functional.binary_cross_entropy(pred, target)
+    if pos_weight != 1.0:
+        # per-element weight: pos_weight for lesion voxels, 1.0 for background
+        w = pos_weight * target + (1.0 - target)
+        bce = nn.functional.binary_cross_entropy(pred, target, weight=w)
+    else:
+        bce = nn.functional.binary_cross_entropy(pred, target)
     return dice_loss(pred, target) + bce
 
 
@@ -51,6 +59,7 @@ def train_one_epoch(
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    pos_weight: float = 1.0,
 ) -> float:
     model.train()
     total_loss = 0.0
@@ -59,7 +68,7 @@ def train_one_epoch(
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
         pred = model(x)
-        loss = combined_loss(pred, y)
+        loss = combined_loss(pred, y, pos_weight=pos_weight)
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
@@ -101,6 +110,7 @@ def train(
     save_path: str,
     device: torch.device,
     save_by: str = "dice",
+    pos_weight: float = 1.0,
 ) -> dict:
     """
     Train model, save best checkpoint.
@@ -109,6 +119,8 @@ def train(
       "dice" — save when val_dice improves (default, good for full-volume eval)
       "loss" — save when val_loss improves (better for patch-based eval where
                empty patches inflate dice to 1.0 artificially)
+
+    pos_weight: upweight lesion voxels in BCE (1.0 = standard, 50.0 = lesion 50× heavier).
 
     Returns history dict with lists: train_loss, val_loss, val_dice.
     """
@@ -125,7 +137,7 @@ def train(
     best_loss = float("inf")
 
     for epoch in range(1, epochs + 1):
-        train_loss = train_one_epoch(model, train_loader, optimizer, device)
+        train_loss = train_one_epoch(model, train_loader, optimizer, device, pos_weight=pos_weight)
         val_loss, val_dice = evaluate(model, val_loader, device)
 
         scheduler.step(val_dice if save_by == "dice" else val_loss)

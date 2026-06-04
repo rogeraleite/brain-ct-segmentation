@@ -12,8 +12,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/  ./src/
 COPY api/  ./api/
-COPY models/best_model_small3DUNet.pth ./models/best_model_small3DUNet.pth
+COPY models/best_model_small3DUNet.pth    ./models/best_model_small3DUNet.pth
 COPY models/best_model_slidingWindow.pth ./models/best_model_slidingWindow.pth
+COPY data/sample/ ./data/sample/
 
 # Make src/ importable without installing it as a package
 ENV PYTHONPATH=/app

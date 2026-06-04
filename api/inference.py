@@ -152,4 +152,5 @@ def predict_from_bytes(
         "lesion_voxel_count": int(mask.sum()),
         "mask_shape": list(mask.shape),
         "mask_base64": mask_b64,
+        "model_version": "mresize-v1",
     }

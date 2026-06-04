@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.ndimage import zoom
+from scipy.ndimage import gaussian_filter, map_coordinates, rotate, zoom
 
 # Brain soft-tissue window.
 # This range captures the clinically relevant structures:
@@ -16,7 +16,9 @@ TARGET_SHAPE: tuple[int, int, int] = (64, 128, 128)
 
 
 def apply_brain_window(volume: np.ndarray) -> np.ndarray:
-    """Clip volume to the brain soft-tissue HU window."""
+    """Clip to brain soft-tissue window, suppressing bone/calcification first."""
+    volume = volume.copy()
+    volume[volume > 100.0] = BRAIN_HU_MIN   # bone/calcification → background
     return np.clip(volume, BRAIN_HU_MIN, BRAIN_HU_MAX)
 
 
@@ -41,6 +43,79 @@ def resize_mask(mask: np.ndarray, target: tuple[int, int, int] = TARGET_SHAPE) -
     factors = [t / s for t, s in zip(target, mask.shape)]
     resized = zoom(mask.astype(np.float32), factors, order=0)
     return (resized > 0.5).astype(np.uint8)
+
+
+def _rotate_pair(
+    volume: np.ndarray, mask: np.ndarray, max_angle: float
+) -> tuple[np.ndarray, np.ndarray]:
+    angle = np.random.uniform(-max_angle, max_angle)
+    vol_r = rotate(volume, angle, axes=(1, 2), reshape=False,
+                   order=1, mode='constant', cval=0.0)
+    mask_r = rotate(mask.astype(np.float32), angle, axes=(1, 2),
+                    reshape=False, order=0, mode='constant', cval=0.0)
+    return vol_r.astype(np.float32), (mask_r > 0.5).astype(np.uint8)
+
+
+def _elastic_pair(
+    volume: np.ndarray, mask: np.ndarray, alpha: float, sigma: float
+) -> tuple[np.ndarray, np.ndarray]:
+    shape = volume.shape
+    fields = [gaussian_filter(np.random.standard_normal(shape), sigma) * alpha
+              for _ in range(3)]
+    grids = np.meshgrid(
+        np.arange(shape[0]), np.arange(shape[1]), np.arange(shape[2]),
+        indexing='ij',
+    )
+    indices = tuple(np.reshape(g + d, (-1,)) for g, d in zip(grids, fields))
+    vol_d = map_coordinates(volume, indices, order=1,
+                            mode='constant').reshape(shape)
+    mask_d = map_coordinates(mask.astype(np.float32), indices, order=0,
+                             mode='constant').reshape(shape)
+    return vol_d.astype(np.float32), (mask_d > 0.5).astype(np.uint8)
+
+
+def _jitter_volume(
+    volume: np.ndarray, shift_range: float, noise_sigma: float
+) -> np.ndarray:
+    shift = float(np.random.uniform(-shift_range, shift_range))
+    noise = np.random.normal(0.0, noise_sigma, volume.shape).astype(np.float32)
+    return np.clip(volume + shift + noise, 0.0, 1.0)
+
+
+def augment_pair(
+    volume: np.ndarray,
+    mask: np.ndarray,
+    p_flip: float = 0.5,
+    p_rotate: float = 0.5,
+    max_angle: float = 10.0,
+    p_elastic: float = 0.5,
+    elastic_alpha: float = 150.0,
+    elastic_sigma: float = 12.0,
+    p_jitter: float = 0.7,
+    jitter_shift: float = 0.0625,
+    jitter_noise_sigma: float = 0.01,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    On-the-fly augmentation applied per sample during training.
+
+    volume: float32 (D, H, W) in [0, 1]
+    mask:   uint8   (D, H, W) in {0, 1}
+
+    Each transform fires independently at its own probability so combinations
+    are possible — e.g. a flipped + rotated + jittered sample in one call.
+    Geometric transforms (flip, rotate, elastic) are applied to both arrays;
+    intensity jitter is volume-only.
+    """
+    if np.random.random() < p_flip:
+        volume = volume[::-1].copy()
+        mask = mask[::-1].copy()
+    if np.random.random() < p_rotate:
+        volume, mask = _rotate_pair(volume, mask, max_angle)
+    if np.random.random() < p_elastic:
+        volume, mask = _elastic_pair(volume, mask, elastic_alpha, elastic_sigma)
+    if np.random.random() < p_jitter:
+        volume = _jitter_volume(volume, jitter_shift, jitter_noise_sigma)
+    return volume, mask
 
 
 def preprocess(

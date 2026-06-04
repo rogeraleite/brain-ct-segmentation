@@ -6,18 +6,21 @@ Run locally:
 
 Endpoints:
     GET  /health        → service + model status
-    POST /segment       → Small3DUNet with global resize (64×128×128)
+    POST /segment/mresize → Small3DUNet with global resize (64×128×128)
     POST /segment/sw    → Small3DUNet with sliding window (native H×W resolution)
 """
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 
 from api.inference import load_model, predict_from_bytes
 from api.inference_sw import load_model_sw, predict_from_bytes_sw
 from api.schemas import HealthResponse, SegmentationResponse
+
+SAMPLE_SCAN = Path(__file__).parent.parent / "data" / "sample" / "demo.nii.gz"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -48,6 +51,15 @@ async def lifespan(app: FastAPI):
     except FileNotFoundError as e:
         logger.warning(f"Sliding window model not found: {e}. /segment/sw will return 503.")
 
+    logger.info("Loading Small3DUNet (sliding window v5) checkpoint...")
+    try:
+        model_sw_v5, device_sw_v5 = load_model_sw("models/best_model_slidingWindow_v5.pth")
+        _state["model_sw_v5"] = model_sw_v5
+        _state["device_sw_v5"] = device_sw_v5
+        logger.info(f"Sliding window v5 model loaded on {device_sw_v5}")
+    except FileNotFoundError as e:
+        logger.warning(f"SW v5 model not found: {e}. /segment/sw_v5 will return 503.")
+
     yield
     _state.clear()
     logger.info("Models unloaded.")
@@ -59,7 +71,7 @@ app = FastAPI(
         "Upload a brain CT scan in NIfTI format (.nii or .nii.gz) and receive "
         "a binary lesion segmentation mask with derived clinical metrics.\n\n"
         "Two models are available for comparison:\n"
-        "- `/segment` — global resize to (64×128×128), fast\n"
+        "- `/segment/mresize` — global resize to (64×128×128), fast\n"
         "- `/segment/sw` — sliding window at native H×W resolution (650×650), higher detail"
     ),
     version="1.1.0",
@@ -88,11 +100,34 @@ async def health() -> HealthResponse:
         model_loaded="model" in _state,
         device=str(_state.get("device", "unavailable")),
         model_sw_loaded="model_sw" in _state,
+        model_sw_v5_loaded="model_sw_v5" in _state,
     )
 
 
+@app.get(
+    "/segment/sample",
+    response_model=SegmentationResponse,
+    summary="Segment built-in demo scan (no upload needed)",
+    response_description="Segmentation of the bundled sample CT (patient 085, 12 mL lesion).",
+)
+async def segment_sample() -> SegmentationResponse:
+    """Run both models on the built-in demo scan and return the resize-model result.
+    Use this to verify the API works without needing your own NIfTI file."""
+    if "model" not in _state:
+        raise HTTPException(status_code=503, detail="Resize model not loaded.")
+    if not SAMPLE_SCAN.exists():
+        raise HTTPException(status_code=404, detail=f"Sample scan not found at {SAMPLE_SCAN}.")
+    try:
+        file_bytes = SAMPLE_SCAN.read_bytes()
+        result = predict_from_bytes(file_bytes, _state["model"], _state["device"])
+    except Exception as exc:
+        logger.exception("Prediction failed (/segment/sample)")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
+    return SegmentationResponse(**result)
+
+
 @app.post(
-    "/segment",
+    "/segment/mresize",
     response_model=SegmentationResponse,
     summary="Segment lesion — global resize model",
     response_description="Binary mask + volume (mL) + hemisphere. Input resized to 64×128×128.",
@@ -113,7 +148,7 @@ async def segment(file: UploadFile = File(...)) -> SegmentationResponse:
 @app.post(
     "/segment/sw",
     response_model=SegmentationResponse,
-    summary="Segment lesion — sliding window model",
+    summary="Segment lesion — sliding window model (v4)",
     response_description="Binary mask + volume (mL) + hemisphere. Native H×W resolution preserved.",
 )
 async def segment_sw(file: UploadFile = File(...)) -> SegmentationResponse:
@@ -125,5 +160,27 @@ async def segment_sw(file: UploadFile = File(...)) -> SegmentationResponse:
         result = predict_from_bytes_sw(file_bytes, _state["model_sw"], _state["device_sw"])
     except Exception as exc:
         logger.exception("Prediction failed (/segment/sw)")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
+    return SegmentationResponse(**result)
+
+
+@app.post(
+    "/segment/sw_v5",
+    response_model=SegmentationResponse,
+    summary="Segment lesion — sliding window model (v5, bone suppression + augmentation)",
+    response_description="Binary mask + volume (mL) + hemisphere. Native H×W resolution, reduced skull false positives.",
+)
+async def segment_sw_v5(file: UploadFile = File(...)) -> SegmentationResponse:
+    if "model_sw_v5" not in _state:
+        raise HTTPException(status_code=503, detail="SW v5 model not loaded. Check models/best_model_slidingWindow_v5.pth.")
+    file_bytes = await file.read()
+    _validate_upload(file, file_bytes)
+    try:
+        result = predict_from_bytes_sw(
+            file_bytes, _state["model_sw_v5"], _state["device_sw_v5"],
+            model_version="sw-v5",
+        )
+    except Exception as exc:
+        logger.exception("Prediction failed (/segment/sw_v5)")
         raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
     return SegmentationResponse(**result)

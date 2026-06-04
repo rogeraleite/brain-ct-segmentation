@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.data.loader import load_nifti
-from src.preprocessing.transforms import normalize
+from src.preprocessing.transforms import augment_pair, normalize
 
 # All volumes in this dataset share H=W=650.
 # D varies from 19 to 40 — we pad shorter volumes to D_MAX so the model
@@ -56,22 +56,29 @@ class PatchBrainCTDataset(Dataset):
         # Pad D to d_max (symmetric, zero-fill)
         volume, mask = _pad_depth(volume, mask, self.d_max)
 
-        # Random crop in H×W
+        # Lesion-centered sampling: 60% of patches are anchored on a lesion voxel.
+        # Pure random crops from 650×650 miss the lesion >99% of the time, causing
+        # the model to converge to the trivial all-zeros solution.
         _, H, W = volume.shape
-        h0 = random.randint(0, H - self.patch_hw)
-        w0 = random.randint(0, W - self.patch_hw)
+        lesion_coords = np.argwhere(mask > 0)  # (N, 3): [d, h, w]
+        use_lesion_center = (len(lesion_coords) > 0) and (random.random() < 0.7)
+        if use_lesion_center:
+            center = lesion_coords[random.randint(0, len(lesion_coords) - 1)]
+            h0 = int(np.clip(center[1] - self.patch_hw // 2, 0, H - self.patch_hw))
+            w0 = int(np.clip(center[2] - self.patch_hw // 2, 0, W - self.patch_hw))
+        else:
+            h0 = random.randint(0, H - self.patch_hw)
+            w0 = random.randint(0, W - self.patch_hw)
         volume = volume[:, h0:h0 + self.patch_hw, w0:w0 + self.patch_hw]
         mask   = mask[:,   h0:h0 + self.patch_hw, w0:w0 + self.patch_hw]
+
+        if self.augment:
+            volume, mask = augment_pair(volume, mask)
 
         x = torch.from_numpy(volume).unsqueeze(0)        # (1, D_MAX, PH, PW)
         y = torch.from_numpy(mask).float().unsqueeze(0)  # (1, D_MAX, PH, PW)
 
         assert torch.isfinite(x).all(), f"Non-finite values in volume: {r['image']}"
-
-        # Depth flip only — same reason as BrainCTDataset (preserves L/R laterality)
-        if self.augment and torch.rand(1).item() > 0.5:
-            x = torch.flip(x, dims=[1])
-            y = torch.flip(y, dims=[1])
 
         return x, y
 

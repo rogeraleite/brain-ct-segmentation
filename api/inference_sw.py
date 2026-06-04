@@ -37,6 +37,7 @@ def predict_from_bytes_sw(
     device: torch.device,
     stride: int = 64,
     threshold: float = 0.5,
+    model_version: str = "sw-v4",
 ) -> dict:
     """
     End-to-end sliding-window inference from raw NIfTI bytes.
@@ -60,8 +61,16 @@ def predict_from_bytes_sw(
     if volume.ndim == 3:
         volume = np.transpose(volume, (2, 0, 1))  # (H,W,D) → (D,H,W)
 
+    # spacing_mm = [D_mm, W_mm, H_mm] after the [::-1] reversal above;
+    # use the smaller in-plane value to be conservative with the exclusion radius.
+    spacing_hw_mm = float(min(spacing_mm[1], spacing_mm[2]))
+
     # Sliding window — returns mask at native resolution (D, H, W)
-    mask = sliding_window_predict(volume, model, device, stride=stride, threshold=threshold)
+    mask = sliding_window_predict(
+        volume, model, device,
+        stride=stride, threshold=threshold,
+        spacing_hw_mm=spacing_hw_mm,
+    )
 
     # Volume: spacing is for the original resolution — no rescaling needed
     lesion_vol = compute_volume_ml(mask, spacing_mm)
@@ -76,4 +85,5 @@ def predict_from_bytes_sw(
         "lesion_voxel_count": int(mask.sum()),
         "mask_shape": list(mask.shape),
         "mask_base64": mask_b64,
+        "model_version": model_version,
     }
