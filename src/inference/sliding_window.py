@@ -89,6 +89,9 @@ def sliding_window_predict(
         excl = _skull_exclusion_mask(volume, _SKULL_HU_THRESH, skull_excl_mm, spacing_hw_mm)
         prob_orig[excl] = 0.0
 
+    # Always zero out predictions outside the intracranial region (background + scalp)
+    prob_orig[_extracranial_mask(volume, _SKULL_HU_THRESH)] = 0.0
+
     return (prob_orig >= threshold).astype(np.uint8)
 
 
@@ -129,6 +132,21 @@ def _skull_exclusion_mask(
         eroded = binary_erosion(intracranial, structure=circle2d, border_value=0)
         skull_zone[i] = intracranial & ~eroded
     return skull_zone
+
+
+def _extracranial_mask(volume_hu: np.ndarray, bone_thresh: float) -> np.ndarray:
+    """
+    True wherever we are outside the filled skull (background, scalp, bone).
+    Slices with no bone are fully masked — model has nothing valid to predict there.
+    """
+    D, H, W = volume_hu.shape
+    mask = np.ones((D, H, W), dtype=bool)
+    for i in range(D):
+        bone = volume_hu[i] > bone_thresh
+        if not bone.any():
+            continue
+        mask[i] = ~binary_fill_holes(bone)
+    return mask
 
 
 def _patch_starts(dim: int, patch: int, stride: int) -> list[int]:
