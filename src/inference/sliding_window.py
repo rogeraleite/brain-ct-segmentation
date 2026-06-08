@@ -9,19 +9,18 @@ averages overlapping probability maps, and returns a mask at native resolution.
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy.ndimage import binary_dilation, binary_erosion, binary_fill_holes
+from scipy.ndimage import binary_erosion, binary_fill_holes
 
 from src.data.patch_dataset import D_MAX, PATCH_HW, _pad_depth
 from src.preprocessing.transforms import normalize, BRAIN_HU_MIN
 
-# HU threshold for bone detection. 300 HU catches diploe (spongy bone, 300–700 HU)
-# in addition to cortical bone, giving a more complete skull mask to dilate around.
+# HU threshold for bone detection (Path 1 — raw CT only).
 _SKULL_HU_THRESH: float = 300.0
 
-# Fraction of in-plane image width used as geometric skull exclusion when the
-# volume is pre-windowed. 5 % of 650 px ≈ 32 px covers the skull ring + a
-# small safety margin for the inner cortex and dura mater.
-_SKULL_GEOM_FRACTION: float = 0.05
+# Distance from outer head contour to inner skull surface (Path 2 — pre-windowed data).
+# Includes scalp (~5–8 mm) + bone (~7 mm). The user-facing excl_mm margin is
+# applied on top of this, measured inward from the inner bone surface.
+_SKULL_THICKNESS_MM: float = 15.0
 
 
 def sliding_window_predict(
@@ -32,7 +31,7 @@ def sliding_window_predict(
     stride: int = 64,
     threshold: float = 0.5,
     spacing_hw_mm: float = 1.0,
-    skull_excl_mm: float = 20.0,
+    skull_excl_mm: float = 3.0,
 ) -> np.ndarray:
     """
     Run sliding-window inference on a native-resolution CT volume.
@@ -103,43 +102,28 @@ def _skull_exclusion_mask(
     bone_thresh: float,
     excl_mm: float,
     spacing_hw: float,
+    skull_thickness_mm: float = _SKULL_THICKNESS_MM,
 ) -> np.ndarray:
     """
-    Build a boolean mask covering the skull boundary zone.
+    Build a boolean mask covering the skull boundary zone (pre-windowed data).
 
-    RAW CT (volume has voxels > bone_thresh):
-        Dilate the dense-bone mask in H×W by excl_mm mm, then union with a
-        fixed geometric border as a belt-and-suspenders fallback.
+    Per axial slice: fill the head outline, then erode inward by
+    (skull_thickness_mm + excl_mm). The skull_thickness_mm traverses the bone
+    from the outer head contour to the inner skull surface; excl_mm is the
+    additional safety margin measured from that inner surface into the brain.
 
-    PRE-WINDOWED data (all HU clipped to brain window, e.g. [-5, 75]):
-        Bone HU unavailable. Per axial slice: fill the head outline with
-        binary_fill_holes, erode inward by excl_mm mm, and return the oval
-        ring between the two surfaces — follows skull geometry, not image border.
+    Everything between the outer contour and (inner surface + excl_mm) is
+    masked out — skull FPs and dura FPs are suppressed, parenchymal lesions
+    are preserved.
     """
     D, H, W = volume_hu.shape
-    bone = volume_hu > bone_thresh
 
-    # Circular structure used for both paths (2-D, H×W plane only)
-    radius_px = max(1, int(round(excl_mm / spacing_hw)))
+    total_mm = skull_thickness_mm + excl_mm
+    radius_px = max(1, int(round(total_mm / spacing_hw)))
     d = 2 * radius_px + 1
     y_g, x_g = np.ogrid[:d, :d]
     circle2d = (y_g - radius_px) ** 2 + (x_g - radius_px) ** 2 <= radius_px ** 2
 
-    if bone.any():
-        # Raw CT: dilate bone mask + rectangular border belt-and-suspenders
-        struct3d = circle2d[np.newaxis, :, :]  # (1, d, d) — no D dilation
-        hu_excl = binary_dilation(bone, structure=struct3d)
-
-        excl_px = max(5, int(round(_SKULL_GEOM_FRACTION * min(H, W))))
-        geo_zone = np.zeros((D, H, W), dtype=bool)
-        geo_zone[:, :excl_px, :]  = True
-        geo_zone[:, -excl_px:, :] = True
-        geo_zone[:, :, :excl_px]  = True
-        geo_zone[:, :, -excl_px:] = True
-        return hu_excl | geo_zone
-
-    # Pre-windowed: per-slice head fill → erode inward → oval skull ring.
-    # Pixels at BRAIN_HU_MIN are clipped background air; any tissue is above.
     skull_zone = np.zeros((D, H, W), dtype=bool)
     for i in range(D):
         slc = volume_hu[i]

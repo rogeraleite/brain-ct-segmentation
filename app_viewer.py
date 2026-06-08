@@ -25,8 +25,7 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 from scipy.ndimage import binary_closing, binary_fill_holes, zoom
 from skimage.measure import marching_cubes, find_contours
-from src.inference.sliding_window import _skull_exclusion_mask, _SKULL_HU_THRESH
-from streamlit_image_coordinates import streamlit_image_coordinates
+from src.inference.sliding_window import _skull_exclusion_mask, _SKULL_HU_THRESH, _SKULL_THICKNESS_MM
 
 from src.data.loader import load_nifti
 from src.preprocessing.transforms import BRAIN_HU_MIN, BRAIN_HU_MAX, apply_brain_window
@@ -39,15 +38,24 @@ POINT_COLOR_2 = (80, 200, 80)
 LINE_COLOR = (255, 220, 50)
 MASK_COLOR = (220, 50, 50)
 MASK_ALPHA = 0.40
+EXCL_COLOR = (0, 200, 80)
+EXCL_ALPHA = 0.35
+CLICK_STEP = 8  # px between click-detection grid points
+
+POLY_POINT_COLOR = (80, 180, 255)
+POLY_LINE_COLOR = (80, 180, 255)
+POLY_FILL_COLOR = (80, 180, 255)
+POLY_FILL_ALPHA = 0.18
+CLOSE_THRESHOLD_PX = 15  # native pixels — click this close to P1 to auto-close
 
 MODEL_OPTIONS = {
-    "Sliding Window v4 — Dice 0.34 · nativo (650×650) · ~20s":             "/segment/sw",
-    "Sliding Window v5 — Dice 0.17 · + augment + supressão de osso · ~20s": "/segment/sw_v5",
+    "Sliding Window v4 — Dice 0.34 · native (650×650) · ~20s":             "/segment/sw",
+    "Sliding Window v5 — Dice 0.17 · + augment + bone suppression · ~20s": "/segment/sw_v5",
     "Resize v1        — Dice 0.27 · 64×128×128        · ~3s":               "/segment/mresize",
 }
 
 # HU thresholds for direct CT-based 3D reconstruction
-SKULL_EXCL_MM = 20.0     # must match skull_excl_mm in sliding_window_predict
+SKULL_EXCL_MM = 3.0      # default skull exclusion margin in mm — measured from inner skull surface
 DISPLAY_HW    = 450      # max display size (px) for the 2D slice viewer
 SKULL_HU_THRESH = 400    # cortical bone (compact: 700–2000+, spongy: 400–700)
 BRAIN_HU_LO     = 20     # brain parenchyma lower bound (white matter ~20–30)
@@ -55,10 +63,10 @@ BRAIN_HU_HI     = 80     # brain parenchyma upper bound (grey matter ~35–45, a
 HEAD_OUTLINE_HU  = -200  # non-air threshold: captures scalp, skull, brain
 
 STRUCTURES = {
-    "brain":      {"label": "Cérebro",         "color": "#E8A4A4", "opacity": 0.40},
-    "skull":      {"label": "Crânio",          "color": "#F5DEB3", "opacity": 0.20},
-    "cerebellum": {"label": "Cerebelo",        "color": "#90CAF9", "opacity": 0.70},
-    "brainstem":  {"label": "Tronco cerebral", "color": "#A5D6A7", "opacity": 0.80},
+    "brain":      {"label": "Brain",      "color": "#E8A4A4", "opacity": 0.40},
+    "skull":      {"label": "Skull",      "color": "#F5DEB3", "opacity": 0.20},
+    "cerebellum": {"label": "Cerebellum", "color": "#90CAF9", "opacity": 0.70},
+    "brainstem":  {"label": "Brainstem",  "color": "#A5D6A7", "opacity": 0.80},
 }
 
 STRUCTURE_FILENAMES = {
@@ -80,7 +88,7 @@ def log(msg: str, level: str = "INFO") -> None:
 
 # ── Cached data loaders ────────────────────────────────────────────────────────
 
-@st.cache_data(show_spinner="Carregando volume...")
+@st.cache_data(show_spinner="Loading volume...")
 def load_volume(file_bytes: bytes, filename: str) -> tuple[np.ndarray, np.ndarray]:
     suffix = ".nii.gz" if filename.endswith(".gz") else ".nii"
     tmp_fd, tmp_path = tempfile.mkstemp(suffix=suffix)
@@ -93,7 +101,7 @@ def load_volume(file_bytes: bytes, filename: str) -> tuple[np.ndarray, np.ndarra
     return volume, spacing
 
 
-@st.cache_data(show_spinner="Rodando segmentação...")
+@st.cache_data(show_spinner="Running segmentation...")
 def call_segment_api(
     file_bytes: bytes, filename: str, api_url: str, endpoint: str
 ) -> dict:
@@ -123,6 +131,8 @@ def build_frame(
     spacing: np.ndarray | None = None,
     excl_mask: np.ndarray | None = None,
     show_excl: bool = False,
+    poly_points: list[dict] | None = None,
+    poly_closed: bool = False,
 ) -> Image.Image:
     arr = slice_to_uint8(volume, slice_idx)
     img = Image.fromarray(arr, mode="L").convert("RGB")
@@ -136,14 +146,25 @@ def build_frame(
             rgb = rgb * (1 - MASK_ALPHA) + overlay * MASK_ALPHA
 
     img = Image.fromarray(rgb.astype(np.uint8), mode="RGB")
+
+    # Polygon fill (RGBA composite before creating the draw object)
+    if poly_points and poly_closed and len(poly_points) >= 3:
+        pts_fill = [(p["x"], p["y"]) for p in poly_points]
+        fill_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+        fill_draw = ImageDraw.Draw(fill_layer)
+        fill_draw.polygon(pts_fill, fill=(*POLY_FILL_COLOR, int(255 * POLY_FILL_ALPHA)))
+        img = Image.alpha_composite(img.convert("RGBA"), fill_layer).convert("RGB")
+
     draw = ImageDraw.Draw(img)
 
     if show_excl and excl_mask is not None:
-        excl_slice = excl_mask[slice_idx].astype(np.float32)
-        for contour in find_contours(excl_slice, 0.5):
-            pts = [(int(round(c[1])), int(round(c[0]))) for c in contour]
-            if len(pts) > 1:
-                draw.line(pts + [pts[0]], fill=(0, 220, 0), width=2)
+        excl_slice = excl_mask[slice_idx].astype(bool)
+        if excl_slice.any():
+            excl_overlay = np.zeros_like(rgb)
+            excl_overlay[excl_slice] = EXCL_COLOR
+            rgb = rgb * (1 - EXCL_ALPHA) + excl_overlay * EXCL_ALPHA
+        img = Image.fromarray(rgb.astype(np.uint8), mode="RGB")
+        draw = ImageDraw.Draw(img)
 
     for i, pt in enumerate(points):
         x, y = pt["x"], pt["y"]
@@ -162,7 +183,137 @@ def build_frame(
             mx, my = (x1 + x2) // 2, (y1 + y2) // 2
             draw.text((mx + 4, my - 16), f"{dist:.1f} mm", fill=LINE_COLOR, font=font)
 
+    # Polygon edges and vertex markers
+    if poly_points:
+        pts_tuples = [(p["x"], p["y"]) for p in poly_points]
+        for i in range(len(pts_tuples) - 1):
+            draw.line([pts_tuples[i], pts_tuples[i + 1]], fill=POLY_LINE_COLOR, width=2)
+        if poly_closed and len(poly_points) >= 3:
+            draw.line([pts_tuples[-1], pts_tuples[0]], fill=POLY_LINE_COLOR, width=2)
+        r = 4
+        for i, pt in enumerate(poly_points):
+            x, y = pt["x"], pt["y"]
+            color = (255, 165, 0) if i == 0 else POLY_POINT_COLOR  # orange = P1 (close target)
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=color, outline="white", width=1)
+
     return img
+
+
+def build_plotly_2d(
+    volume: np.ndarray,
+    slice_idx: int,
+    mask_full: np.ndarray | None,
+    show_mask: bool,
+    points: list[dict],
+    spacing: np.ndarray | None = None,
+    excl_mask: np.ndarray | None = None,
+    show_excl: bool = False,
+    poly_points: list[dict] | None = None,
+    poly_closed: bool = False,
+    zoom: int = 1,
+) -> go.Figure:
+    arr = slice_to_uint8(volume, slice_idx)
+    rgb = np.array(Image.fromarray(arr, mode="L").convert("RGB"), dtype=np.float32)
+
+    if show_mask and mask_full is not None:
+        m = mask_full[slice_idx].astype(bool)
+        if m.any():
+            overlay = np.zeros_like(rgb)
+            overlay[m] = MASK_COLOR
+            rgb = rgb * (1 - MASK_ALPHA) + overlay * MASK_ALPHA
+
+    if show_excl and excl_mask is not None:
+        excl_slice = excl_mask[slice_idx].astype(bool)
+        if excl_slice.any():
+            excl_overlay = np.zeros_like(rgb)
+            excl_overlay[excl_slice] = EXCL_COLOR
+            rgb = rgb * (1 - EXCL_ALPHA) + excl_overlay * EXCL_ALPHA
+
+    h, w = arr.shape
+    fig = go.Figure()
+    fig.add_trace(go.Image(z=rgb.astype(np.uint8), hoverinfo="skip"))
+
+    if len(points) == 2:
+        x1, y1 = points[0]["x"], points[0]["y"]
+        x2, y2 = points[1]["x"], points[1]["y"]
+        fig.add_trace(go.Scatter(
+            x=[x1, x2], y=[y1, y2], mode="lines",
+            line=dict(color=f"rgb{LINE_COLOR}", width=2),
+            showlegend=False, hoverinfo="skip",
+        ))
+        if spacing is not None:
+            dist = compute_distance_mm(points[0], points[1], spacing)
+            fig.add_annotation(
+                x=(x1 + x2) / 2, y=(y1 + y2) / 2,
+                text=f"{dist:.1f} mm", showarrow=False,
+                font=dict(color=f"rgb{LINE_COLOR}", size=13),
+                xshift=4, yshift=8,
+            )
+    for i, pt in enumerate(points):
+        color = f"rgb{POINT_COLOR_1}" if i == 0 else f"rgb{POINT_COLOR_2}"
+        fig.add_trace(go.Scatter(
+            x=[pt["x"]], y=[pt["y"]], mode="markers+text",
+            marker=dict(color=color, size=10, line=dict(color="white", width=2)),
+            text=[f"P{i+1}"], textposition="top right",
+            textfont=dict(color=color),
+            showlegend=False, hoverinfo="skip",
+        ))
+
+    if poly_points:
+        xs_p = [p["x"] for p in poly_points]
+        ys_p = [p["y"] for p in poly_points]
+        if poly_closed and len(poly_points) >= 3:
+            xs_p = xs_p + [xs_p[0]]
+            ys_p = ys_p + [ys_p[0]]
+        fig.add_trace(go.Scatter(
+            x=xs_p, y=ys_p, mode="lines",
+            fill="toself" if poly_closed else "none",
+            fillcolor=f"rgba({POLY_FILL_COLOR[0]},{POLY_FILL_COLOR[1]},{POLY_FILL_COLOR[2]},{POLY_FILL_ALPHA})",
+            line=dict(color=f"rgb{POLY_LINE_COLOR}", width=2),
+            showlegend=False, hoverinfo="skip",
+        ))
+        for i, pt in enumerate(poly_points):
+            marker_color = "rgb(255,165,0)" if i == 0 else f"rgb{POLY_POINT_COLOR}"
+            fig.add_trace(go.Scatter(
+                x=[pt["x"]], y=[pt["y"]], mode="markers",
+                marker=dict(color=marker_color, size=8, line=dict(color="white", width=1)),
+                showlegend=False, hoverinfo="skip",
+            ))
+
+    # Transparent grid — captures single clicks for measurement placement
+    xs_g = list(range(0, w, CLICK_STEP))
+    ys_g = list(range(0, h, CLICK_STEP))
+    XX, YY = np.meshgrid(xs_g, ys_g)
+    fig.add_trace(go.Scatter(
+        x=XX.flatten().tolist(), y=YY.flatten().tolist(),
+        mode="markers",
+        marker=dict(size=CLICK_STEP, opacity=0, color="rgba(0,0,0,0)"),
+        showlegend=False, name="_click", hoverinfo="skip",
+        selected=dict(marker=dict(opacity=0)),
+        unselected=dict(marker=dict(opacity=0)),
+    ))
+
+    if zoom > 1:
+        cx, cy = w / 2, h / 2
+        hw = w / (2 * zoom)
+        hh = h / (2 * zoom)
+        xrange = [cx - hw, cx + hw]
+        yrange = [cy + hh, cy - hh]
+    else:
+        xrange = [-0.5, w - 0.5]
+        yrange = [h - 0.5, -0.5]
+
+    fig.update_layout(
+        uirevision=zoom,
+        dragmode="pan",
+        clickmode="event+select",
+        margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor="black",
+        height=DISPLAY_HW,
+        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False, range=xrange),
+        yaxis=dict(showticklabels=False, showgrid=False, zeroline=False, range=yrange, scaleanchor="x"),
+    )
+    return fig
 
 
 def compute_distance_mm(p1: dict, p2: dict, spacing: np.ndarray) -> float:
@@ -173,6 +324,17 @@ def compute_distance_mm(p1: dict, p2: dict, spacing: np.ndarray) -> float:
 
 def compute_area_mm2(mask_full: np.ndarray, slice_idx: int, spacing: np.ndarray) -> float:
     return float(mask_full[slice_idx].sum()) * spacing[1] * spacing[2]
+
+
+def compute_polygon_area_mm2(poly_pts: list[dict], spacing: np.ndarray) -> float:
+    """Shoelace formula on polygon vertices, result in mm²."""
+    n = len(poly_pts)
+    if n < 3:
+        return 0.0
+    xs = [p["x"] * float(spacing[2]) for p in poly_pts]
+    ys = [p["y"] * float(spacing[1]) for p in poly_pts]
+    area = sum(xs[i] * ys[(i + 1) % n] - xs[(i + 1) % n] * ys[i] for i in range(n))
+    return abs(area) / 2.0
 
 
 def decode_mask(result: dict, volume_shape: tuple) -> np.ndarray:
@@ -191,7 +353,7 @@ def ts_installed() -> tuple[bool, str]:
         from importlib.metadata import version
         return True, version("TotalSegmentator")
     except Exception:
-        return False, "não instalado"
+        return False, "not installed"
 
 
 def ts_device() -> str:
@@ -246,8 +408,8 @@ def run_totalsegmentator(file_bytes: bytes, filename: str) -> dict[str, np.ndarr
 
         if proc.returncode != 0:
             raise RuntimeError(
-                f"TotalSegmentator saiu com código {proc.returncode}. "
-                f"Veja a aba Logs para detalhes."
+                f"TotalSegmentator exited with code {proc.returncode}. "
+                f"See the Logs tab for details."
             )
 
         masks = {}
@@ -257,10 +419,10 @@ def run_totalsegmentator(file_bytes: bytes, filename: str) -> dict[str, np.ndarr
                 if os.path.exists(fpath):
                     arr, _ = load_nifti(fpath)
                     masks[name] = (arr > 0.5).astype(np.uint8)
-                    log(f"Estrutura carregada: {name} ({int(arr.sum())} voxels)")
+                    log(f"Structure loaded: {name} ({int(arr.sum())} voxels)")
                     break
             else:
-                log(f"Estrutura não encontrada: {name}", level="WARN")
+                log(f"Structure not found: {name}", level="WARN")
 
         return masks
 
@@ -283,7 +445,7 @@ def compute_mesh(
         )
         return verts, faces
     except Exception as e:
-        log(f"marching_cubes falhou: {e}", level="ERROR")
+        log(f"marching_cubes failed: {e}", level="ERROR")
         return None
 
 
@@ -305,7 +467,7 @@ def compute_full_head_mesh(
         )
         return verts, faces
     except Exception as e:
-        log(f"Full-head marching_cubes falhou: {e}", level="ERROR")
+        log(f"Full-head marching_cubes failed: {e}", level="ERROR")
         return None
 
 
@@ -402,7 +564,7 @@ def build_3d_figure(
             x=sv[:, 2].tolist(), y=sv[:, 1].tolist(), z=sv[:, 0].tolist(),
             i=sf[:, 0].tolist(), j=sf[:, 1].tolist(), k=sf[:, 2].tolist(),
             color="#D4C5A0", opacity=0.18,
-            name="Crânio (HU>400)", showlegend=True,
+            name="Skull (HU>400)", showlegend=True,
             lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
         ))
 
@@ -413,7 +575,7 @@ def build_3d_figure(
             x=bv[:, 2].tolist(), y=bv[:, 1].tolist(), z=bv[:, 0].tolist(),
             i=bf[:, 0].tolist(), j=bf[:, 1].tolist(), k=bf[:, 2].tolist(),
             color="#E8A4A4", opacity=0.40,
-            name="Cérebro (HU 20–80)", showlegend=True,
+            name="Brain (HU 20–80)", showlegend=True,
             lighting=dict(ambient=0.6, diffuse=0.8, specular=0.2),
         ))
 
@@ -434,7 +596,7 @@ def build_3d_figure(
             x=xs.tolist(), y=ys.tolist(), z=Z.tolist(),
             surfacecolor=slc_ds.tolist(),
             colorscale="Gray", showscale=False,
-            opacity=1.0, name=f"Fatia {slice_idx}", showlegend=True,
+            opacity=1.0, name=f"Slice {slice_idx}", showlegend=True,
         ))
 
     fig.update_layout(
@@ -462,8 +624,10 @@ st.title("Brain CT — Slice Viewer")
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.header("Configurações")
-    api_url = st.text_input("URL da API", value="http://localhost:8011")
+    st.header("Settings")
+    api_port = st.number_input("API port", min_value=1, max_value=65535, value=8000, step=1)
+    api_url = f"http://localhost:{api_port}"
+    st.caption(f"API: {api_url}")
     uploaded = st.file_uploader("CT Volume (.nii / .nii.gz)", type=["nii", "gz"])
 
     volume = None
@@ -486,85 +650,92 @@ with st.sidebar:
             st.session_state.pop("ts_full_head", None)
             st.session_state.pop("hu_meshes", None)
             st.session_state.pop("excl_mask", None)
+            st.session_state.pop("excl_mask_key", None)
             st.session_state["ts_file"] = filename
 
         try:
             volume, spacing = load_volume(file_bytes, filename)
         except Exception as e:
-            log(f"Erro ao carregar volume: {e}", level="ERROR")
-            st.error(f"Erro ao carregar volume: {e}")
+            log(f"Error loading volume: {e}", level="ERROR")
+            st.error(f"Error loading volume: {e}")
             st.stop()
 
         # Auto-compute HU meshes once per file (skull + brain from CT directly)
         if "hu_meshes" not in st.session_state:
-            with st.spinner("Computando malhas 3D (HU: crânio + cérebro)..."):
-                log("=== HU meshes iniciado ===")
+            with st.spinner("Computing 3D meshes (HU: skull + brain)..."):
+                log("=== HU meshes started ===")
                 st.session_state["hu_meshes"] = compute_hu_meshes(volume, spacing)
-                log(f"=== HU meshes concluído: {list(st.session_state['hu_meshes'].keys())} ===")
-
-        # Compute skull exclusion mask once per file+version for visualization
-        _EXCL_CACHE_KEY = f"excl_mask_v{SKULL_EXCL_MM}"
-        if st.session_state.get("excl_mask_ver") != _EXCL_CACHE_KEY:
-            spacing_hw_mm = float(min(spacing[1], spacing[2]))
-            st.session_state["excl_mask"] = _skull_exclusion_mask(
-                volume, _SKULL_HU_THRESH, SKULL_EXCL_MM, spacing_hw_mm
-            )
-            st.session_state["excl_mask_ver"] = _EXCL_CACHE_KEY
+                log(f"=== HU meshes completed: {list(st.session_state['hu_meshes'].keys())} ===")
 
         # ── Lesion segmentation (API) ──────────────────────────────────────
         st.divider()
-        st.subheader("Segmentação de Lesão")
-        model_label = st.radio("Modelo", list(MODEL_OPTIONS.keys()))
+        st.subheader("Lesion Segmentation")
+        model_label = st.radio("Model", list(MODEL_OPTIONS.keys()))
         endpoint = MODEL_OPTIONS[model_label]
 
-        with st.expander("Comparativo de modelos"):
+        with st.expander("Model comparison"):
             st.markdown(
-                "| Modelo | Dice | Resolução | Velocidade | Novidades |\n"
+                "| Model | Dice | Resolution | Speed | Notes |\n"
                 "|---|---|---|---|---|\n"
-                "| **SW v4** | 0.339 | 650×650 nativo | ~20s | lesion-centered 70/30, pos_weight=50 |\n"
-                "| SW v5 | 0.172 | 650×650 nativo | ~20s | + augment (rot/elastic/jitter) + supressão de osso |\n"
+                "| **SW v4** | 0.339 | 650×650 native | ~20s | lesion-centered 70/30, pos_weight=50 |\n"
+                "| SW v5 | 0.172 | 650×650 native | ~20s | + augment (rot/elastic/jitter) + bone suppression |\n"
                 "| Resize v1 | 0.272 | 64×128×128 | ~3s | baseline |\n\n"
-                "_Dice no validation set (40 volumes). "
+                "_Dice on validation set (40 volumes). "
                 "SW v4 = epoch 79, SW v5 = epoch 74, Resize v1 = epoch 46._"
             )
 
-        if st.button("Rodar Segmentação", type="primary"):
+        if st.button("Run Segmentation", type="primary"):
             st.session_state.pop("seg_result", None)
             st.session_state.pop("seg_endpoint", None)
 
         if "seg_result" not in st.session_state or st.session_state.get("seg_endpoint") != endpoint:
-            log(f"Chamando API: {api_url}{endpoint}")
+            log(f"Calling API: {api_url}{endpoint}")
             try:
                 result = call_segment_api(file_bytes, filename, api_url, endpoint)
                 st.session_state["seg_result"] = result
                 st.session_state["seg_endpoint"] = endpoint
-                log(f"API OK — lesão: {result['lesion_volume_ml']:.3f} mL · {result['hemisphere']}")
+                log(f"API OK — lesion: {result['lesion_volume_ml']:.3f} mL · {result['hemisphere']}")
             except requests.exceptions.ConnectionError:
-                msg = f"API não encontrada em {api_url}"
+                msg = f"API not found at {api_url}"
                 log(msg, level="ERROR")
                 st.error(msg)
             except requests.exceptions.HTTPError as e:
-                msg = f"Erro da API ({e.response.status_code}): {e.response.text}"
+                msg = f"API error ({e.response.status_code}): {e.response.text}"
                 log(msg, level="ERROR")
                 st.error(msg)
             except Exception as e:
-                log(f"Erro na segmentação: {e}", level="ERROR")
-                st.error(f"Erro na segmentação: {e}")
+                log(f"Segmentation error: {e}", level="ERROR")
+                st.error(f"Segmentation error: {e}")
 
         if "seg_result" in st.session_state:
             seg_result = st.session_state["seg_result"]
             mask_full = decode_mask(seg_result, volume.shape)
             st.caption(
-                f"Modelo: {seg_result.get('model_version', 'v1.0')} · "
+                f"Model: {seg_result.get('model_version', 'v1.0')} · "
                 f"endpoint: `{endpoint}`"
             )
 
         # ── View controls ──────────────────────────────────────────────────
         st.divider()
-        show_mask = st.checkbox("Mostrar overlay de segmentação", value=True)
-        show_excl = st.checkbox("Mostrar zona de exclusão de osso", value=False)
-        show_area = st.checkbox("Mostrar área da lesão (fatia)", value=False)
-        slice_idx = st.slider("Fatia axial", 0, volume.shape[0] - 1, volume.shape[0] // 2)
+        show_mask = st.checkbox("Show segmentation overlay", value=True)
+        show_excl = st.checkbox("Show bone exclusion zone", value=False)
+        skull_excl_mm = st.slider(
+            "Skull exclusion margin (mm)", 0.0, 15.0, SKULL_EXCL_MM,
+            step=1.0, disabled=not show_excl,
+            help="Safety margin past the inner skull surface (bone traversal of 7mm is always applied on top). Re-run segmentation to apply to the model.",
+        )
+        show_area = st.checkbox("Show lesion area (slice)", value=False)
+        slice_idx = st.slider("Axial slice", 0, volume.shape[0] - 1, volume.shape[0] // 2)
+
+        # Recompute exclusion mask whenever file or margin changes
+        _excl_key = f"excl_{filename}_{skull_excl_mm}"
+        if st.session_state.get("excl_mask_key") != _excl_key:
+            spacing_hw_mm = float(min(spacing[1], spacing[2]))
+            st.session_state["excl_mask"] = _skull_exclusion_mask(
+                volume, _SKULL_HU_THRESH, skull_excl_mm, spacing_hw_mm,
+                skull_thickness_mm=_SKULL_THICKNESS_MM,
+            )
+            st.session_state["excl_mask_key"] = _excl_key
 
         if mask_full is not None:
             per_slice = mask_full.sum(axis=(1, 2))
@@ -592,15 +763,33 @@ with st.sidebar:
                 fig_sp, use_container_width=True,
                 config={"displayModeBar": False}, key="sparkline",
             )
-            st.caption("Vermelho = fatias com lesão · Linha amarela = fatia atual")
+            st.caption("Red = slices with lesion · Yellow line = current slice")
 
         st.divider()
-        if st.button("Resetar medição"):
-            st.session_state["points"] = []
+        measure_mode = st.radio(
+            "Measurement tool",
+            ["Distance", "Area (polygon)"],
+            horizontal=True,
+            key="measure_mode",
+        )
+        if measure_mode == "Distance":
+            if st.button("Reset measurement"):
+                st.session_state["points"] = []
+        else:
+            n_poly = len(st.session_state.get("poly_points", []))
+            poly_is_closed = st.session_state.get("poly_closed", False)
+            col_pb1, col_pb2 = st.columns(2)
+            if col_pb1.button("Close polygon", disabled=(n_poly < 3 or poly_is_closed)):
+                st.session_state["poly_closed"] = True
+                st.rerun()
+            if col_pb2.button("Reset polygon"):
+                st.session_state["poly_points"] = []
+                st.session_state["poly_closed"] = False
+                st.rerun()
 
         # ── TotalSegmentator 3D ────────────────────────────────────────────
         st.divider()
-        st.subheader("Visualização 3D")
+        st.subheader("3D Visualization")
 
         ts_ok, ts_ver = ts_installed()
         if ts_ok:
@@ -612,17 +801,17 @@ with st.sidebar:
             )
             if not weights_ok:
                 st.warning(
-                    "Pesos do modelo não encontrados. "
-                    "A primeira execução fará download de ~1.3 GB — pode demorar 10-20 min.",
+                    "Model weights not found. "
+                    "First run will download ~1.3 GB — may take 10-20 min.",
                     icon="⚠️",
                 )
         else:
-            st.error("TotalSegmentator não instalado.\n```\npip install totalsegmentator\n```")
+            st.error("TotalSegmentator not installed.\n```\npip install totalsegmentator\n```")
 
-        if ts_ok and st.button("Rodar TotalSegmentator", type="secondary"):
-            with st.spinner("Rodando TotalSegmentator (fast)… veja a aba Logs para progresso"):
+        if ts_ok and st.button("Run TotalSegmentator", type="secondary"):
+            with st.spinner("Running TotalSegmentator (fast)… see the Logs tab for progress"):
                 try:
-                    log("=== TotalSegmentator iniciado ===")
+                    log("=== TotalSegmentator started ===")
                     masks = run_totalsegmentator(file_bytes, filename)
                     meshes = {}
                     ts_stats = {}
@@ -638,14 +827,14 @@ with st.sidebar:
                     st.session_state["ts_stats"] = ts_stats
                     st.session_state["ts_full_head"] = full_head
                     found = [STRUCTURES[n]["label"] for n in meshes]
-                    log(f"=== TotalSegmentator concluído: {', '.join(found)} ===")
-                    st.success(f"Estruturas: {', '.join(found)}")
+                    log(f"=== TotalSegmentator completed: {', '.join(found)} ===")
+                    st.success(f"Structures: {', '.join(found)}")
                 except Exception as e:
-                    log(f"TotalSegmentator falhou: {e}", level="ERROR")
+                    log(f"TotalSegmentator failed: {e}", level="ERROR")
                     st.error(str(e))
 
         if "ts_stats" in st.session_state and st.session_state["ts_stats"]:
-            st.caption("Volumes por estrutura (TS):")
+            st.caption("Volumes by structure (TS):")
             for name, cfg in STRUCTURES.items():
                 stats = st.session_state["ts_stats"].get(name, {})
                 if stats:
@@ -653,11 +842,15 @@ with st.sidebar:
 
 # ── Main area (tabs) ───────────────────────────────────────────────────────────
 if volume is None:
-    st.info("Faça upload de um arquivo NIfTI (.nii ou .nii.gz) na barra lateral.")
+    st.info("Upload a NIfTI file (.nii or .nii.gz) in the sidebar.")
     st.stop()
 
 if "points" not in st.session_state:
     st.session_state["points"] = []
+if "poly_points" not in st.session_state:
+    st.session_state["poly_points"] = []
+if "poly_closed" not in st.session_state:
+    st.session_state["poly_closed"] = False
 
 points = st.session_state["points"]
 
@@ -671,54 +864,92 @@ with tab_viewer:
         # Version badge above image
         if seg_result:
             model_ver = seg_result.get("model_version", "v1.0")
-            st.caption(f"Identificação: {model_ver} · `{endpoint}`")
+            st.caption(f"Model: {model_ver} · `{endpoint}`")
 
-        frame = build_frame(
-            volume, slice_idx, mask_full, show_mask, points, spacing,
+        _mode = st.session_state.get("measure_mode", "Distance")
+        _poly_pts = st.session_state.get("poly_points", [])
+        _poly_closed = st.session_state.get("poly_closed", False)
+
+        _zoom = st.session_state.get("_zoom_slider", 1)
+        fig_2d = build_plotly_2d(
+            volume, slice_idx, mask_full, show_mask,
+            points if _mode == "Distance" else [],
+            spacing,
             excl_mask=st.session_state.get("excl_mask"),
             show_excl=show_excl,
+            poly_points=_poly_pts if _mode == "Area (polygon)" else None,
+            poly_closed=_poly_closed,
+            zoom=_zoom,
         )
-        # Resize to DISPLAY_HW so the image fits the column without overflowing.
-        # Coords from streamlit_image_coordinates are in the resized image space —
-        # scale back to native before storing so build_frame always draws correctly.
-        nat_w, nat_h = frame.width, frame.height
-        disp_w = min(DISPLAY_HW, nat_w)
-        disp_h = min(DISPLAY_HW, nat_h)
-        frame_disp = frame.resize((disp_w, disp_h), Image.LANCZOS)
+        event = st.plotly_chart(
+            fig_2d, on_select="rerun", key="viewer_2d", use_container_width=True
+        )
+        st.select_slider("Zoom", options=[1, 2, 4, 8], key="_zoom_slider",
+                         format_func=lambda x: f"{x}×")
 
-        clicked = streamlit_image_coordinates(frame_disp, key="viewer")
+        if event and event.selection and event.selection.points:
+            sel = event.selection.points[0]
+            new_pt = {"x": int(round(sel["x"])), "y": int(round(sel["y"]))}
+            current_sel = (new_pt["x"], new_pt["y"])
+            if current_sel != st.session_state.get("_last_sel"):
+                st.session_state["_last_sel"] = current_sel
+                if _mode == "Distance":
+                    if len(points) < 2:
+                        points.append(new_pt)
+                    else:
+                        points[0] = points[1]
+                        points[1] = new_pt
+                    st.session_state["points"] = points
+                else:  # Area (polygon)
+                    if not _poly_closed:
+                        if len(_poly_pts) >= 3:
+                            first = _poly_pts[0]
+                            dist_px = math.sqrt(
+                                (new_pt["x"] - first["x"]) ** 2 +
+                                (new_pt["y"] - first["y"]) ** 2
+                            )
+                            if dist_px <= CLOSE_THRESHOLD_PX:
+                                st.session_state["poly_closed"] = True
+                            else:
+                                _poly_pts.append(new_pt)
+                                st.session_state["poly_points"] = _poly_pts
+                        else:
+                            _poly_pts.append(new_pt)
+                            st.session_state["poly_points"] = _poly_pts
+        elif event and event.selection and not event.selection.points:
+            st.session_state.pop("_last_sel", None)
 
-        last = st.session_state.get("last_click")
-        if clicked is not None and clicked != last:
-            st.session_state["last_click"] = clicked
-            new_pt = {
-                "x": int(round(clicked["x"] * nat_w / disp_w)),
-                "y": int(round(clicked["y"] * nat_h / disp_h)),
-            }
-            if len(points) < 2:
-                points.append(new_pt)
+        if _mode == "Distance":
+            if len(points) == 0:
+                st.caption("Click on the image to mark P1")
+            elif len(points) == 1:
+                st.caption("P1 marked. Click to mark P2.")
             else:
-                points[0] = points[1]
-                points[1] = new_pt
-            st.session_state["points"] = points
-            st.rerun()
-
-        if len(points) == 0:
-            st.caption("Clique na imagem para marcar P1")
-        elif len(points) == 1:
-            st.caption("P1 marcado. Clique para marcar P2.")
+                dist = compute_distance_mm(points[0], points[1], spacing)
+                st.markdown(f"**Distance: {dist:.1f} mm**")
         else:
-            dist = compute_distance_mm(points[0], points[1], spacing)
-            st.markdown(f"**Distância: {dist:.1f} mm**")
+            if len(_poly_pts) == 0:
+                st.caption("Click to add polygon vertices")
+            elif not _poly_closed:
+                st.caption(
+                    f"{len(_poly_pts)} point(s). "
+                    "Click near P1 (orange) or press **Close polygon** to close."
+                )
+            else:
+                poly_area = compute_polygon_area_mm2(_poly_pts, spacing)
+                st.markdown(
+                    f"**Area: {poly_area:.1f} mm²** "
+                    f"({poly_area / 100:.2f} cm²)"
+                )
 
         if show_area and mask_full is not None:
             area = compute_area_mm2(mask_full, slice_idx, spacing)
-            st.markdown(f"**Área da lesão (fatia {slice_idx}):** {area:.1f} mm²")
+            st.markdown(f"**Lesion area (slice {slice_idx}):** {area:.1f} mm²")
 
         if seg_result:
             m1, m2 = st.columns(2)
-            m1.metric("Volume da lesão", f"{seg_result['lesion_volume_ml']:.3f} mL")
-            m2.metric("Hemisfério", seg_result["hemisphere"])
+            m1.metric("Lesion volume", f"{seg_result['lesion_volume_ml']:.3f} mL")
+            m2.metric("Hemisphere", seg_result["hemisphere"])
 
         st.caption(
             f"Spacing: D={spacing[0]:.2f} mm · H={spacing[1]:.2f} mm · W={spacing[2]:.2f} mm  |  "
@@ -740,12 +971,12 @@ with tab_viewer:
 with tab_logs:
     logs = st.session_state.get("logs", [])
     col_l, col_r = st.columns([4, 1])
-    col_l.caption(f"{len(logs)} entradas")
-    if col_r.button("Limpar logs"):
+    col_l.caption(f"{len(logs)} entries")
+    if col_r.button("Clear logs"):
         st.session_state["logs"] = []
         st.rerun()
 
     if logs:
         st.code("\n".join(reversed(logs)), language=None)
     else:
-        st.info("Nenhum log ainda. Execute uma segmentação ou rode o TotalSegmentator.")
+        st.info("No logs yet. Run a segmentation or TotalSegmentator.")
