@@ -25,7 +25,7 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 from scipy.ndimage import binary_closing, binary_fill_holes, zoom
 from skimage.measure import marching_cubes, find_contours
-from src.inference.sliding_window import _skull_exclusion_mask, _SKULL_HU_THRESH, _SKULL_THICKNESS_MM
+from src.inference.sliding_window import _skull_exclusion_mask, _SKULL_HU_THRESH
 
 from src.data.loader import load_nifti
 from src.preprocessing.transforms import BRAIN_HU_MIN, BRAIN_HU_MAX, apply_brain_window
@@ -38,8 +38,11 @@ POINT_COLOR_2 = (80, 200, 80)
 LINE_COLOR = (255, 220, 50)
 MASK_COLOR = (220, 50, 50)
 MASK_ALPHA = 0.40
-EXCL_COLOR = (0, 200, 80)
-EXCL_ALPHA = 0.35
+EXCL_COLOR = (220, 180, 50)
+EXCL_CONTOUR_COLOR = (255, 220, 50)
+EXCL_ALPHA = 0.40
+GT_COLOR = (0, 200, 80)
+GT_ALPHA = 0.40
 CLICK_STEP = 8  # px between click-detection grid points
 
 POLY_POINT_COLOR = (80, 180, 255)
@@ -53,6 +56,9 @@ MODEL_OPTIONS = {
     "Sliding Window v5 — Dice 0.17 · + augment + bone suppression · ~20s": "/segment/sw_v5",
     "Resize v1        — Dice 0.27 · 64×128×128        · ~3s":               "/segment/mresize",
 }
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+MASKS_DIR = os.path.join(_APP_DIR, "data", "raw", "masks")
 
 # HU thresholds for direct CT-based 3D reconstruction
 SKULL_EXCL_MM = 3.0      # default skull exclusion margin in mm — measured from inner skull surface
@@ -133,11 +139,14 @@ def build_frame(
     show_excl: bool = False,
     poly_points: list[dict] | None = None,
     poly_closed: bool = False,
+    gt_mask: np.ndarray | None = None,
+    show_gt: bool = False,
 ) -> Image.Image:
     arr = slice_to_uint8(volume, slice_idx)
     img = Image.fromarray(arr, mode="L").convert("RGB")
     rgb = np.array(img, dtype=np.float32)
 
+    # All numpy blending in one pass (order: model pred → GT → exclusion zone)
     if show_mask and mask_full is not None:
         m = mask_full[slice_idx].astype(bool)
         if m.any():
@@ -145,9 +154,23 @@ def build_frame(
             overlay[m] = MASK_COLOR
             rgb = rgb * (1 - MASK_ALPHA) + overlay * MASK_ALPHA
 
+    if show_gt and gt_mask is not None:
+        gm = gt_mask[slice_idx].astype(bool)
+        if gm.any():
+            gt_overlay = np.zeros_like(rgb)
+            gt_overlay[gm] = GT_COLOR
+            rgb = rgb * (1 - GT_ALPHA) + gt_overlay * GT_ALPHA
+
+    if show_excl and excl_mask is not None:
+        excl_slice = excl_mask[slice_idx].astype(bool)
+        if excl_slice.any():
+            excl_overlay = np.zeros_like(rgb)
+            excl_overlay[excl_slice] = EXCL_COLOR
+            rgb = rgb * (1 - EXCL_ALPHA) + excl_overlay * EXCL_ALPHA
+
     img = Image.fromarray(rgb.astype(np.uint8), mode="RGB")
 
-    # Polygon fill (RGBA composite before creating the draw object)
+    # Polygon fill (RGBA composite)
     if poly_points and poly_closed and len(poly_points) >= 3:
         pts_fill = [(p["x"], p["y"]) for p in poly_points]
         fill_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -157,14 +180,14 @@ def build_frame(
 
     draw = ImageDraw.Draw(img)
 
+    # Exclusion zone inner-boundary contour line
     if show_excl and excl_mask is not None:
         excl_slice = excl_mask[slice_idx].astype(bool)
         if excl_slice.any():
-            excl_overlay = np.zeros_like(rgb)
-            excl_overlay[excl_slice] = EXCL_COLOR
-            rgb = rgb * (1 - EXCL_ALPHA) + excl_overlay * EXCL_ALPHA
-        img = Image.fromarray(rgb.astype(np.uint8), mode="RGB")
-        draw = ImageDraw.Draw(img)
+            for contour in find_contours(excl_slice.astype(float), 0.5):
+                pts = [(int(c[1]), int(c[0])) for c in contour]
+                for i in range(len(pts) - 1):
+                    draw.line([pts[i], pts[i + 1]], fill=EXCL_CONTOUR_COLOR, width=2)
 
     for i, pt in enumerate(points):
         x, y = pt["x"], pt["y"]
@@ -211,6 +234,9 @@ def build_plotly_2d(
     poly_points: list[dict] | None = None,
     poly_closed: bool = False,
     zoom: int = 1,
+    dragmode: str = "pan",
+    gt_mask: np.ndarray | None = None,
+    show_gt: bool = False,
 ) -> go.Figure:
     arr = slice_to_uint8(volume, slice_idx)
     rgb = np.array(Image.fromarray(arr, mode="L").convert("RGB"), dtype=np.float32)
@@ -221,6 +247,13 @@ def build_plotly_2d(
             overlay = np.zeros_like(rgb)
             overlay[m] = MASK_COLOR
             rgb = rgb * (1 - MASK_ALPHA) + overlay * MASK_ALPHA
+
+    if show_gt and gt_mask is not None:
+        gm = gt_mask[slice_idx].astype(bool)
+        if gm.any():
+            gt_overlay = np.zeros_like(rgb)
+            gt_overlay[gm] = GT_COLOR
+            rgb = rgb * (1 - GT_ALPHA) + gt_overlay * GT_ALPHA
 
     if show_excl and excl_mask is not None:
         excl_slice = excl_mask[slice_idx].astype(bool)
@@ -280,17 +313,29 @@ def build_plotly_2d(
                 showlegend=False, hoverinfo="skip",
             ))
 
-    # Transparent grid — captures single clicks for measurement placement
+    # Exclusion zone contour line at inner boundary
+    if show_excl and excl_mask is not None:
+        excl_slice = excl_mask[slice_idx].astype(bool)
+        if excl_slice.any():
+            for contour in find_contours(excl_slice.astype(float), 0.5):
+                fig.add_trace(go.Scatter(
+                    x=contour[:, 1].tolist(), y=contour[:, 0].tolist(),
+                    mode="lines",
+                    line=dict(color=f"rgb{EXCL_CONTOUR_COLOR}", width=2),
+                    showlegend=False, hoverinfo="skip",
+                ))
+
+    # Near-invisible grid — opacity>0 keeps SVG pointer-events active for click detection
     xs_g = list(range(0, w, CLICK_STEP))
     ys_g = list(range(0, h, CLICK_STEP))
     XX, YY = np.meshgrid(xs_g, ys_g)
     fig.add_trace(go.Scatter(
         x=XX.flatten().tolist(), y=YY.flatten().tolist(),
         mode="markers",
-        marker=dict(size=CLICK_STEP, opacity=0, color="rgba(0,0,0,0)"),
-        showlegend=False, name="_click", hoverinfo="skip",
-        selected=dict(marker=dict(opacity=0)),
-        unselected=dict(marker=dict(opacity=0)),
+        marker=dict(size=16, opacity=0.01, color="rgba(128,128,128,0.01)"),
+        showlegend=False, name="_click", hoverinfo="none",
+        selected=dict(marker=dict(opacity=0.01)),
+        unselected=dict(marker=dict(opacity=0.01)),
     ))
 
     if zoom > 1:
@@ -305,7 +350,7 @@ def build_plotly_2d(
 
     fig.update_layout(
         uirevision=zoom,
-        dragmode="pan",
+        dragmode=dragmode,
         clickmode="event+select",
         margin=dict(l=0, r=0, t=0, b=0),
         paper_bgcolor="black",
@@ -537,6 +582,8 @@ def build_3d_figure(
     vol_shape: tuple,
     volume: np.ndarray | None = None,
     full_head_mesh: tuple | None = None,
+    gt_mask: np.ndarray | None = None,
+    show_gt: bool = False,
 ) -> go.Figure:
     """Render skull + brain (HU-based, clipped below slice) + CT texture at slice plane."""
     fig = go.Figure()
@@ -579,7 +626,20 @@ def build_3d_figure(
             lighting=dict(ambient=0.6, diffuse=0.8, specular=0.2),
         ))
 
-    # 4. CT slice — actual scan image as the cutting plane surface
+    # 4. Ground truth lesion mesh — green surface
+    if show_gt and gt_mask is not None:
+        gt_result = compute_mesh(gt_mask, spacing)
+        if gt_result is not None:
+            gv, gf = gt_result
+            fig.add_trace(go.Mesh3d(
+                x=gv[:, 2].tolist(), y=gv[:, 1].tolist(), z=gv[:, 0].tolist(),
+                i=gf[:, 0].tolist(), j=gf[:, 1].tolist(), k=gf[:, 2].tolist(),
+                color="#00C850", opacity=0.70,
+                name="Ground truth", showlegend=True,
+                lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
+            ))
+
+    # 5. CT slice — actual scan image as the cutting plane surface
     if volume is not None:
         slc = volume[slice_idx].astype(np.float32)
         slc_win = np.clip(slc, BRAIN_HU_MIN, BRAIN_HU_MAX)
@@ -634,9 +694,11 @@ with st.sidebar:
     spacing = None
     seg_result = None
     mask_full = None
+    gt_mask_full = None
     show_area = False
     show_mask = False
     show_excl = False
+    show_gt = False
     slice_idx = 0
     endpoint = list(MODEL_OPTIONS.values())[0]
 
@@ -666,6 +728,25 @@ with st.sidebar:
                 log("=== HU meshes started ===")
                 st.session_state["hu_meshes"] = compute_hu_meshes(volume, spacing)
                 log(f"=== HU meshes completed: {list(st.session_state['hu_meshes'].keys())} ===")
+
+        # ── Ground truth mask ──────────────────────────────────────────────
+        _gt_path = os.path.join(MASKS_DIR, filename)
+        if os.path.exists(_gt_path):
+            with open(_gt_path, "rb") as _f:
+                _gt_bytes = _f.read()
+            _gt_vol, _ = load_volume(_gt_bytes, filename)
+            gt_mask_full = (_gt_vol > 0.5).astype(np.uint8)
+            st.caption(f"Ground truth auto-loaded: {filename}")
+        else:
+            _uploaded_gt = st.file_uploader(
+                "Ground truth mask (.nii / .nii.gz)",
+                type=["nii", "gz"],
+                key="gt_uploader",
+            )
+            if _uploaded_gt:
+                _gt_bytes = _uploaded_gt.read()
+                _gt_vol, _ = load_volume(_gt_bytes, _uploaded_gt.name)
+                gt_mask_full = (_gt_vol > 0.5).astype(np.uint8)
 
         # ── Lesion segmentation (API) ──────────────────────────────────────
         st.divider()
@@ -721,9 +802,10 @@ with st.sidebar:
         show_excl = st.checkbox("Show bone exclusion zone", value=False)
         skull_excl_mm = st.slider(
             "Skull exclusion margin (mm)", 0.0, 15.0, SKULL_EXCL_MM,
-            step=1.0, disabled=not show_excl,
-            help="Safety margin past the inner skull surface (bone traversal of 7mm is always applied on top). Re-run segmentation to apply to the model.",
+            step=0.5, disabled=not show_excl,
+            help="Inward margin from the inner skull surface. Updates the overlay and lesion volume in real time — no re-run needed.",
         )
+        show_gt = st.checkbox("Show ground truth", value=False, disabled=gt_mask_full is None)
         show_area = st.checkbox("Show lesion area (slice)", value=False)
         slice_idx = st.slider("Axial slice", 0, volume.shape[0] - 1, volume.shape[0] // 2)
 
@@ -733,7 +815,6 @@ with st.sidebar:
             spacing_hw_mm = float(min(spacing[1], spacing[2]))
             st.session_state["excl_mask"] = _skull_exclusion_mask(
                 volume, _SKULL_HU_THRESH, skull_excl_mm, spacing_hw_mm,
-                skull_thickness_mm=_SKULL_THICKNESS_MM,
             )
             st.session_state["excl_mask_key"] = _excl_key
 
@@ -765,27 +846,7 @@ with st.sidebar:
             )
             st.caption("Red = slices with lesion · Yellow line = current slice")
 
-        st.divider()
-        measure_mode = st.radio(
-            "Measurement tool",
-            ["Distance", "Area (polygon)"],
-            horizontal=True,
-            key="measure_mode",
-        )
-        if measure_mode == "Distance":
-            if st.button("Reset measurement"):
-                st.session_state["points"] = []
-        else:
-            n_poly = len(st.session_state.get("poly_points", []))
-            poly_is_closed = st.session_state.get("poly_closed", False)
-            col_pb1, col_pb2 = st.columns(2)
-            if col_pb1.button("Close polygon", disabled=(n_poly < 3 or poly_is_closed)):
-                st.session_state["poly_closed"] = True
-                st.rerun()
-            if col_pb2.button("Reset polygon"):
-                st.session_state["poly_points"] = []
-                st.session_state["poly_closed"] = False
-                st.rerun()
+
 
         # ── TotalSegmentator 3D ────────────────────────────────────────────
         st.divider()
@@ -866,26 +927,60 @@ with tab_viewer:
             model_ver = seg_result.get("model_version", "v1.0")
             st.caption(f"Model: {model_ver} · `{endpoint}`")
 
-        _mode = st.session_state.get("measure_mode", "Distance")
+        _viewer_mode = st.session_state.get("_viewer_mode", "Navigate")
+        # Clear last-click dedup when mode changes so first click always registers
+        if _viewer_mode != st.session_state.get("_prev_viewer_mode"):
+            st.session_state["_prev_viewer_mode"] = _viewer_mode
+            st.session_state.pop("_last_sel", None)
         _poly_pts = st.session_state.get("poly_points", [])
         _poly_closed = st.session_state.get("poly_closed", False)
 
         _zoom = st.session_state.get("_zoom_slider", 1)
+        _excl_arr = st.session_state.get("excl_mask")
+        if show_excl and mask_full is not None and _excl_arr is not None:
+            mask_filtered = mask_full.copy()
+            mask_filtered[_excl_arr] = 0
+        else:
+            mask_filtered = mask_full
         fig_2d = build_plotly_2d(
-            volume, slice_idx, mask_full, show_mask,
-            points if _mode == "Distance" else [],
+            volume, slice_idx, mask_filtered, show_mask,
+            points if _viewer_mode == "Distance" else [],
             spacing,
-            excl_mask=st.session_state.get("excl_mask"),
+            excl_mask=_excl_arr,
             show_excl=show_excl,
-            poly_points=_poly_pts if _mode == "Area (polygon)" else None,
+            poly_points=_poly_pts if _viewer_mode == "Area" else None,
             poly_closed=_poly_closed,
             zoom=_zoom,
+            dragmode="pan" if _viewer_mode == "Navigate" else "select",
+            gt_mask=gt_mask_full,
+            show_gt=show_gt,
         )
         event = st.plotly_chart(
             fig_2d, on_select="rerun", key="viewer_2d", use_container_width=True
         )
-        st.select_slider("Zoom", options=[1, 2, 4, 8], key="_zoom_slider",
-                         format_func=lambda x: f"{x}×")
+        _ctrl_left, _ctrl_mid, _ctrl_right = st.columns([2, 4, 2])
+        _ctrl_left.select_slider("Zoom", options=[1, 2, 4, 8], key="_zoom_slider",
+                                 format_func=lambda x: f"{x}×")
+        _ctrl_mid.radio("Mode", ["Navigate", "Distance", "Area"], horizontal=True,
+                        key="_viewer_mode", label_visibility="collapsed")
+        if _viewer_mode == "Distance":
+            if _ctrl_right.button("Reset", key="_rst_dist"):
+                st.session_state["points"] = []
+                st.session_state.pop("_last_sel", None)
+                st.rerun()
+        elif _viewer_mode == "Area":
+            _n_poly = len(st.session_state.get("poly_points", []))
+            _poly_done = st.session_state.get("poly_closed", False)
+            if not _poly_done and _n_poly >= 3:
+                if _ctrl_right.button("Close", key="_close_poly"):
+                    st.session_state["poly_closed"] = True
+                    st.rerun()
+            else:
+                if _ctrl_right.button("Reset", key="_rst_poly"):
+                    st.session_state["poly_points"] = []
+                    st.session_state["poly_closed"] = False
+                    st.session_state.pop("_last_sel", None)
+                    st.rerun()
 
         if event and event.selection and event.selection.points:
             sel = event.selection.points[0]
@@ -893,14 +988,14 @@ with tab_viewer:
             current_sel = (new_pt["x"], new_pt["y"])
             if current_sel != st.session_state.get("_last_sel"):
                 st.session_state["_last_sel"] = current_sel
-                if _mode == "Distance":
+                if _viewer_mode == "Distance":
                     if len(points) < 2:
                         points.append(new_pt)
                     else:
                         points[0] = points[1]
                         points[1] = new_pt
                     st.session_state["points"] = points
-                else:  # Area (polygon)
+                elif _viewer_mode == "Area":
                     if not _poly_closed:
                         if len(_poly_pts) >= 3:
                             first = _poly_pts[0]
@@ -919,7 +1014,7 @@ with tab_viewer:
         elif event and event.selection and not event.selection.points:
             st.session_state.pop("_last_sel", None)
 
-        if _mode == "Distance":
+        if _viewer_mode == "Distance":
             if len(points) == 0:
                 st.caption("Click on the image to mark P1")
             elif len(points) == 1:
@@ -927,13 +1022,13 @@ with tab_viewer:
             else:
                 dist = compute_distance_mm(points[0], points[1], spacing)
                 st.markdown(f"**Distance: {dist:.1f} mm**")
-        else:
+        elif _viewer_mode == "Area":
             if len(_poly_pts) == 0:
                 st.caption("Click to add polygon vertices")
             elif not _poly_closed:
                 st.caption(
                     f"{len(_poly_pts)} point(s). "
-                    "Click near P1 (orange) or press **Close polygon** to close."
+                    "Click near P1 (orange) or press **Close** to finish."
                 )
             else:
                 poly_area = compute_polygon_area_mm2(_poly_pts, spacing)
@@ -942,13 +1037,19 @@ with tab_viewer:
                     f"({poly_area / 100:.2f} cm²)"
                 )
 
-        if show_area and mask_full is not None:
-            area = compute_area_mm2(mask_full, slice_idx, spacing)
+        if show_area and mask_filtered is not None:
+            area = compute_area_mm2(mask_filtered, slice_idx, spacing)
             st.markdown(f"**Lesion area (slice {slice_idx}):** {area:.1f} mm²")
 
         if seg_result:
             m1, m2 = st.columns(2)
-            m1.metric("Lesion volume", f"{seg_result['lesion_volume_ml']:.3f} mL")
+            if mask_filtered is not None:
+                vol_ml = float(mask_filtered.sum()) * float(np.prod(spacing)) / 1000.0
+                vol_label = "Lesion vol (bone excl.)" if show_excl else "Lesion volume"
+            else:
+                vol_ml = seg_result["lesion_volume_ml"]
+                vol_label = "Lesion volume"
+            m1.metric(vol_label, f"{vol_ml:.3f} mL")
             m2.metric("Hemisphere", seg_result["hemisphere"])
 
         st.caption(
@@ -964,6 +1065,8 @@ with tab_viewer:
             vol_shape=volume.shape,
             volume=volume,
             full_head_mesh=st.session_state.get("ts_full_head"),
+            gt_mask=gt_mask_full,
+            show_gt=show_gt,
         )
         st.plotly_chart(fig, use_container_width=True)
 

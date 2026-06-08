@@ -14,13 +14,8 @@ from scipy.ndimage import binary_erosion, binary_fill_holes
 from src.data.patch_dataset import D_MAX, PATCH_HW, _pad_depth
 from src.preprocessing.transforms import normalize, BRAIN_HU_MIN
 
-# HU threshold for bone detection (Path 1 — raw CT only).
+# HU threshold for bone detection (unused for brain-windowed data; kept for raw-HU callers).
 _SKULL_HU_THRESH: float = 300.0
-
-# Distance from outer head contour to inner skull surface (Path 2 — pre-windowed data).
-# Includes scalp (~5–8 mm) + bone (~7 mm). The user-facing excl_mm margin is
-# applied on top of this, measured inward from the inner bone surface.
-_SKULL_THICKNESS_MM: float = 15.0
 
 
 def sliding_window_predict(
@@ -31,7 +26,7 @@ def sliding_window_predict(
     stride: int = 64,
     threshold: float = 0.5,
     spacing_hw_mm: float = 1.0,
-    skull_excl_mm: float = 3.0,
+    skull_excl_mm: float = 0.0,
 ) -> np.ndarray:
     """
     Run sliding-window inference on a native-resolution CT volume.
@@ -102,24 +97,21 @@ def _skull_exclusion_mask(
     bone_thresh: float,
     excl_mm: float,
     spacing_hw: float,
-    skull_thickness_mm: float = _SKULL_THICKNESS_MM,
 ) -> np.ndarray:
     """
-    Build a boolean mask covering the skull boundary zone (pre-windowed data).
+    Build a boolean mask covering the exclusion zone just inside the inner skull surface.
 
-    Per axial slice: fill the head outline, then erode inward by
-    (skull_thickness_mm + excl_mm). The skull_thickness_mm traverses the bone
-    from the outer head contour to the inner skull surface; excl_mm is the
-    additional safety margin measured from that inner surface into the brain.
-
-    Everything between the outer contour and (inner surface + excl_mm) is
-    masked out — skull FPs and dura FPs are suppressed, parenchymal lesions
-    are preserved.
+    Per axial slice:
+    1. Detect bone (HU > bone_thresh).
+    2. Fill the skull ring interior → intracranial region (bone + brain).
+    3. Remove bone pixels → brain/intracranial space only.
+    4. Erode inward by excl_mm → brain space beyond the margin.
+    5. Exclusion zone = intracranial space minus eroded = band from the
+       inner skull surface inward by excl_mm.
     """
     D, H, W = volume_hu.shape
 
-    total_mm = skull_thickness_mm + excl_mm
-    radius_px = max(1, int(round(total_mm / spacing_hw)))
+    radius_px = max(1, int(round(excl_mm / spacing_hw)))
     d = 2 * radius_px + 1
     y_g, x_g = np.ogrid[:d, :d]
     circle2d = (y_g - radius_px) ** 2 + (x_g - radius_px) ** 2 <= radius_px ** 2
@@ -127,12 +119,15 @@ def _skull_exclusion_mask(
     skull_zone = np.zeros((D, H, W), dtype=bool)
     for i in range(D):
         slc = volume_hu[i]
-        head_bin = slc > (BRAIN_HU_MIN + 1.0)
-        if not head_bin.any():
+        bone_mask = slc > bone_thresh
+        if not bone_mask.any():
             continue
-        filled = binary_fill_holes(head_bin)
-        eroded = binary_erosion(filled, structure=circle2d, border_value=0)
-        skull_zone[i] = filled & ~eroded
+        skull_filled = binary_fill_holes(bone_mask)   # bone ring + enclosed brain
+        intracranial = skull_filled & ~bone_mask       # intracranial space only
+        if not intracranial.any():
+            continue
+        eroded = binary_erosion(intracranial, structure=circle2d, border_value=0)
+        skull_zone[i] = intracranial & ~eroded
     return skull_zone
 
 
