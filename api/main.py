@@ -14,7 +14,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 
 from api.inference import load_model, predict_from_bytes
 from api.inference_sw import load_model_sw, predict_from_bytes_sw
@@ -60,6 +60,15 @@ async def lifespan(app: FastAPI):
     except FileNotFoundError as e:
         logger.warning(f"SW v5 model not found: {e}. /segment/sw_v5 will return 503.")
 
+    logger.info("Loading Small3DUNet (sliding window v6) checkpoint...")
+    try:
+        model_sw_v6, device_sw_v6 = load_model_sw("models/best_model_slidingWindow_v6.pth")
+        _state["model_sw_v6"] = model_sw_v6
+        _state["device_sw_v6"] = device_sw_v6
+        logger.info(f"Sliding window v6 model loaded on {device_sw_v6}")
+    except FileNotFoundError as e:
+        logger.warning(f"SW v6 model not found: {e}. /segment/sw_v6 will return 503.")
+
     yield
     _state.clear()
     logger.info("Models unloaded.")
@@ -101,6 +110,7 @@ async def health() -> HealthResponse:
         device=str(_state.get("device", "unavailable")),
         model_sw_loaded="model_sw" in _state,
         model_sw_v5_loaded="model_sw_v5" in _state,
+        model_sw_v6_loaded="model_sw_v6" in _state,
     )
 
 
@@ -151,13 +161,19 @@ async def segment(file: UploadFile = File(...)) -> SegmentationResponse:
     summary="Segment lesion — sliding window model (v4)",
     response_description="Binary mask + volume (mL) + hemisphere. Native H×W resolution preserved.",
 )
-async def segment_sw(file: UploadFile = File(...)) -> SegmentationResponse:
+async def segment_sw(
+    file: UploadFile = File(...),
+    threshold: float = Query(default=0.5, ge=0.0, le=1.0),
+) -> SegmentationResponse:
     if "model_sw" not in _state:
         raise HTTPException(status_code=503, detail="Sliding window model not loaded. Check models/best_model_slidingWindow.pth.")
     file_bytes = await file.read()
     _validate_upload(file, file_bytes)
     try:
-        result = predict_from_bytes_sw(file_bytes, _state["model_sw"], _state["device_sw"])
+        result = predict_from_bytes_sw(
+            file_bytes, _state["model_sw"], _state["device_sw"],
+            threshold=threshold,
+        )
     except Exception as exc:
         logger.exception("Prediction failed (/segment/sw)")
         raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
@@ -170,7 +186,10 @@ async def segment_sw(file: UploadFile = File(...)) -> SegmentationResponse:
     summary="Segment lesion — sliding window model (v5, bone suppression + augmentation)",
     response_description="Binary mask + volume (mL) + hemisphere. Native H×W resolution, reduced skull false positives.",
 )
-async def segment_sw_v5(file: UploadFile = File(...)) -> SegmentationResponse:
+async def segment_sw_v5(
+    file: UploadFile = File(...),
+    threshold: float = Query(default=0.5, ge=0.0, le=1.0),
+) -> SegmentationResponse:
     if "model_sw_v5" not in _state:
         raise HTTPException(status_code=503, detail="SW v5 model not loaded. Check models/best_model_slidingWindow_v5.pth.")
     file_bytes = await file.read()
@@ -179,8 +198,35 @@ async def segment_sw_v5(file: UploadFile = File(...)) -> SegmentationResponse:
         result = predict_from_bytes_sw(
             file_bytes, _state["model_sw_v5"], _state["device_sw_v5"],
             model_version="sw-v5",
+            threshold=threshold,
         )
     except Exception as exc:
         logger.exception("Prediction failed (/segment/sw_v5)")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
+    return SegmentationResponse(**result)
+
+
+@app.post(
+    "/segment/sw_v6",
+    response_model=SegmentationResponse,
+    summary="Segment lesion — sliding window model (v6, skull-strip + no elastic)",
+    response_description="Binary mask + volume (mL) + hemisphere. Skull stripping pre-processing, no elastic augmentation.",
+)
+async def segment_sw_v6(
+    file: UploadFile = File(...),
+    threshold: float = Query(default=0.5, ge=0.0, le=1.0),
+) -> SegmentationResponse:
+    if "model_sw_v6" not in _state:
+        raise HTTPException(status_code=503, detail="SW v6 model not loaded. Check models/best_model_slidingWindow_v6.pth.")
+    file_bytes = await file.read()
+    _validate_upload(file, file_bytes)
+    try:
+        result = predict_from_bytes_sw(
+            file_bytes, _state["model_sw_v6"], _state["device_sw_v6"],
+            model_version="sw-v6",
+            threshold=threshold,
+        )
+    except Exception as exc:
+        logger.exception("Prediction failed (/segment/sw_v6)")
         raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
     return SegmentationResponse(**result)

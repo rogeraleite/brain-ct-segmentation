@@ -54,6 +54,7 @@ POLY_FILL_ALPHA = 0.18
 CLOSE_THRESHOLD_PX = 15  # native pixels — click this close to P1 to auto-close
 
 MODEL_OPTIONS = {
+    "Sliding Window v6 — Dice ~0.28 · no-elastic · bone excl post-inf · ~20s": "/segment/sw_v6",
     "Sliding Window v4 — Dice 0.34 · native (650×650) · ~20s":             "/segment/sw",
     "Sliding Window v5 — Dice 0.17 · + augment + bone suppression · ~20s": "/segment/sw_v5",
     "Resize v1        — Dice 0.27 · 64×128×128        · ~3s":               "/segment/mresize",
@@ -111,11 +112,13 @@ def load_volume(file_bytes: bytes, filename: str) -> tuple[np.ndarray, np.ndarra
 
 @st.cache_data(show_spinner="Running segmentation...")
 def call_segment_api(
-    file_bytes: bytes, filename: str, api_url: str, endpoint: str
+    file_bytes: bytes, filename: str, api_url: str, endpoint: str,
+    threshold: float = 0.5,
 ) -> dict:
     response = requests.post(
         f"{api_url}{endpoint}",
         files={"file": (filename, file_bytes, "application/octet-stream")},
+        params={"threshold": threshold},
         timeout=180,
     )
     response.raise_for_status()
@@ -780,23 +783,33 @@ with st.sidebar:
             st.markdown(
                 "| Model | Dice | Resolution | Speed | Notes |\n"
                 "|---|---|---|---|---|\n"
+                "| SW v6 | ~0.28 | 650×650 native | ~20s | no elastic aug, bone excl post-inference only |\n"
                 "| **SW v4** | 0.339 | 650×650 native | ~20s | lesion-centered 70/30, pos_weight=50 |\n"
                 "| SW v5 | 0.172 | 650×650 native | ~20s | + augment (rot/elastic/jitter) + bone suppression |\n"
                 "| Resize v1 | 0.272 | 64×128×128 | ~3s | baseline |\n\n"
-                "_Dice on validation set (40 volumes). "
-                "SW v4 = epoch 79, SW v5 = epoch 74, Resize v1 = epoch 46._"
+                "_Dice on validation set. "
+                "SW v6 = patch-based estimate (ep78), SW v4 = epoch 79, SW v5 = epoch 74, Resize v1 = epoch 46._"
             )
+
+        seg_threshold = st.slider(
+            "Prediction threshold", 0.05, 0.95, 0.50, step=0.05,
+            help="Probability cutoff for binarising model output. Lower values show more (weaker) predictions.",
+        )
 
         if st.button("Run Segmentation", type="primary"):
             st.session_state.pop("seg_result", None)
             st.session_state.pop("seg_endpoint", None)
+            st.session_state.pop("seg_threshold", None)
+            call_segment_api.clear()
 
-        if "seg_result" not in st.session_state or st.session_state.get("seg_endpoint") != endpoint:
-            log(f"Calling API: {api_url}{endpoint}")
+        _threshold_changed = st.session_state.get("seg_threshold") != seg_threshold
+        if "seg_result" not in st.session_state or st.session_state.get("seg_endpoint") != endpoint or _threshold_changed:
+            log(f"Calling API: {api_url}{endpoint} threshold={seg_threshold}")
             try:
-                result = call_segment_api(file_bytes, filename, api_url, endpoint)
+                result = call_segment_api(file_bytes, filename, api_url, endpoint, seg_threshold)
                 st.session_state["seg_result"] = result
                 st.session_state["seg_endpoint"] = endpoint
+                st.session_state["seg_threshold"] = seg_threshold
                 log(f"API OK — lesion: {result['lesion_volume_ml']:.3f} mL · {result['hemisphere']}")
             except requests.exceptions.ConnectionError:
                 msg = f"API not found at {api_url}"
@@ -955,11 +968,6 @@ with tab_viewer:
             key="slice_idx",
         )
 
-        # Version badge above image
-        if seg_result:
-            model_ver = seg_result.get("model_version", "v1.0")
-            st.caption(f"Model: {model_ver} · `{endpoint}`")
-
         _viewer_mode = st.session_state.get("_viewer_mode", "Navigate")
         # Clear last-click dedup when mode changes so first click always registers
         if _viewer_mode != st.session_state.get("_prev_viewer_mode"):
@@ -1027,6 +1035,15 @@ with tab_viewer:
                 innerskull_mask=st.session_state.get("innerskull_mask"),
                 show_innerskull=show_innerskull,
             )
+            if seg_result:
+                fig_2d.add_annotation(
+                    xref="paper", yref="paper",
+                    x=0.99, y=0.01,
+                    text=seg_result.get("model_version", "v1.0"),
+                    showarrow=False,
+                    font=dict(color="rgba(200,200,200,0.65)", size=10),
+                    xanchor="right", yanchor="bottom",
+                )
             st.plotly_chart(fig_2d, key="viewer_2d", use_container_width=True,
                             config={"displayModeBar": False})
             click_data = None
@@ -1041,6 +1058,16 @@ with tab_viewer:
                 poly_closed=_poly_closed,
                 gt_mask=gt_mask_full, show_gt=show_gt,
             )
+            if seg_result:
+                _ov_draw = ImageDraw.Draw(frame)
+                _ov_font = ImageFont.load_default(size=11)
+                _ov_text = seg_result.get("model_version", "v1.0")
+                _fw, _fh = frame.size
+                _bb = _ov_draw.textbbox((0, 0), _ov_text, font=_ov_font)
+                _ov_draw.text(
+                    (_fw - (_bb[2] - _bb[0]) - 6, _fh - (_bb[3] - _bb[1]) - 6),
+                    _ov_text, fill=(200, 200, 200), font=_ov_font,
+                )
             click_data = streamlit_image_coordinates(frame, key="viewer_2d_sic")
 
         _ctrl_left, _ctrl_mid, _ctrl_right = st.columns([2, 4, 2])

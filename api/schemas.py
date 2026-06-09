@@ -7,6 +7,7 @@ class HealthResponse(BaseModel):
     device: str
     model_sw_loaded: bool = False
     model_sw_v5_loaded: bool = False
+    model_sw_v6_loaded: bool = False
 
 
 class SegmentationResponse(BaseModel):

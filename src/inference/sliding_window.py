@@ -12,7 +12,7 @@ import torch.nn as nn
 from scipy.ndimage import binary_erosion, binary_fill_holes
 
 from src.data.patch_dataset import D_MAX, PATCH_HW, _pad_depth
-from src.preprocessing.transforms import normalize, BRAIN_HU_MIN
+from src.preprocessing.transforms import normalize, extract_intracranial_mask, BRAIN_HU_MIN
 
 # HU threshold for bone detection (unused for brain-windowed data; kept for raw-HU callers).
 _SKULL_HU_THRESH: float = 300.0
@@ -27,6 +27,7 @@ def sliding_window_predict(
     threshold: float = 0.5,
     spacing_hw_mm: float = 1.0,
     skull_excl_mm: float = 0.0,
+    skull_strip: bool = False,
 ) -> np.ndarray:
     """
     Run sliding-window inference on a native-resolution CT volume.
@@ -54,6 +55,11 @@ def sliding_window_predict(
         mask: (D, H, W) uint8 binary mask at native resolution
     """
     D, H, W = volume.shape
+
+    # Skull stripping must run on raw HU before normalize() loses bone signal.
+    if skull_strip:
+        intracranial = extract_intracranial_mask(volume)
+        volume = np.where(intracranial, volume, BRAIN_HU_MIN)
 
     # Normalize (brain window + [0,1]) — no spatial resize
     volume_norm = normalize(volume).astype(np.float32)
