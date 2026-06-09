@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.ndimage import gaussian_filter, map_coordinates, rotate, zoom
+from scipy.ndimage import binary_fill_holes, gaussian_filter, map_coordinates, rotate, zoom
 
 # Brain soft-tissue window.
 # This range captures the clinically relevant structures:
@@ -9,10 +9,46 @@ from scipy.ndimage import gaussian_filter, map_coordinates, rotate, zoom
 BRAIN_HU_MIN: float = -5.0
 BRAIN_HU_MAX: float = 75.0
 
+# Threshold for identifying cortical bone — used only for spatial skull masking,
+# not for HU windowing (which uses the 100 HU cutoff in apply_brain_window).
+_SKULL_BONE_HU: float = 300.0
+
 # Training volume size: (D, H, W).
 # 64×128×128 is a deliberate trade-off: small enough for CPU training in <4h,
 # large enough to preserve spatial structure for segmentation.
 TARGET_SHAPE: tuple[int, int, int] = (64, 128, 128)
+
+
+def extract_intracranial_mask(volume_hu: np.ndarray) -> np.ndarray:
+    """
+    Return a bool (D, H, W) mask that is True inside the skull ring.
+
+    Handles two data regimes automatically:
+      - Raw CT (max HU > 100): cortical bone at _SKULL_BONE_HU (300 HU)
+      - Brain-windowed data (max HU ≤ 100, e.g. JPEG-sourced): bone was
+        clipped to BRAIN_HU_MAX (75 HU); use the top 15% of the HU range
+        as the skull-ring proxy (≈ 63 HU threshold).
+
+    Per axial slice: detect the skull ring, call binary_fill_holes to capture
+    the enclosed intracranial region, and return that as the mask.  Slices
+    with no detectable bone are left all-False.
+    """
+    vol_max = float(volume_hu.max())
+    if vol_max > 100.0:
+        skull_thresh = _SKULL_BONE_HU
+    else:
+        # Saturated pixels (bone clipped to BRAIN_HU_MAX) mark the skull ring.
+        # Threshold at 85 % of the HU range to catch the ring while avoiding
+        # most brain tissue (grey matter tops out at ~40 HU in this window).
+        skull_thresh = BRAIN_HU_MIN + 0.85 * (BRAIN_HU_MAX - BRAIN_HU_MIN)
+
+    D, H, W = volume_hu.shape
+    mask = np.zeros((D, H, W), dtype=bool)
+    for i in range(D):
+        bone = volume_hu[i] > skull_thresh
+        if bone.any():
+            mask[i] = binary_fill_holes(bone)
+    return mask
 
 
 def apply_brain_window(volume: np.ndarray) -> np.ndarray:
@@ -122,12 +158,14 @@ def preprocess(
     volume: np.ndarray,
     mask: np.ndarray,
     target: tuple[int, int, int] = TARGET_SHAPE,
+    skull_strip: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Full preprocessing pipeline:
       1. NaN/inf guard (defensive — should already be clean from loader)
-      2. Brain windowing + normalization → [0, 1]
-      3. Resize volume (trilinear) and mask (nearest-neighbor) to target shape
+      2. Optional skull stripping: zero out extracranial voxels before normalization
+      3. Brain windowing + normalization → [0, 1]
+      4. Resize volume (trilinear) and mask (nearest-neighbor) to target shape
 
     Returns:
         volume_norm: float32 (D, H, W), values in [0, 1]
@@ -135,6 +173,10 @@ def preprocess(
     """
     volume = np.nan_to_num(volume, nan=-1000.0, posinf=3000.0, neginf=-1000.0)
     mask = (mask > 0.5).astype(np.uint8)
+
+    if skull_strip:
+        intracranial = extract_intracranial_mask(volume)
+        volume = np.where(intracranial, volume, BRAIN_HU_MIN)
 
     volume_norm = normalize(resize_volume(volume, target))
     mask_resized = resize_mask(mask, target)

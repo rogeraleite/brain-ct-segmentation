@@ -21,8 +21,10 @@ from src.preprocessing.transforms import preprocess
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", default="data/raw")
-    parser.add_argument("--out-dir",   default="data/processed")
+    parser.add_argument("--data-root",    default="data/raw")
+    parser.add_argument("--out-dir",      default="data/processed")
+    parser.add_argument("--skull-strip",  action="store_true",
+                        help="Zero out extracranial voxels before normalization")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -35,7 +37,7 @@ def main() -> None:
     for i, r in enumerate(tqdm(records, desc="Preprocessing")):
         volume, _ = load_nifti(r["image"])
         mask,   _ = load_nifti(r["mask"])
-        vol_pp, msk_pp = preprocess(volume, mask)
+        vol_pp, msk_pp = preprocess(volume, mask, skull_strip=args.skull_strip)
 
         stem = Path(r["image"]).name.split(".")[0]
         np.save(out_dir / "volumes" / f"{stem}.npy", vol_pp)

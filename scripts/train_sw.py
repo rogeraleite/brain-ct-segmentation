@@ -47,8 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr",         type=float, default=1e-3)
     parser.add_argument("--val-split",  type=float, default=0.2)
     parser.add_argument("--seed",       type=int,   default=42)
-    parser.add_argument("--no-augment", action="store_true")
-    parser.add_argument("--pos-weight", type=float, default=50.0)
+    parser.add_argument("--no-augment",  action="store_true")
+    parser.add_argument("--no-elastic",  action="store_true",
+                        help="Disable elastic deformation augmentation")
+    parser.add_argument("--skull-strip", action="store_true",
+                        help="Zero out extracranial voxels before normalization")
+    parser.add_argument("--pos-weight",  type=float, default=50.0)
     return parser.parse_args()
 
 
@@ -64,8 +68,8 @@ def main() -> None:
     )
     print(f"Dataset     : {len(records)} total | {len(train_records)} train | {len(val_records)} val")
 
-    train_ds = PatchBrainCTDataset(train_records, augment=not args.no_augment)
-    val_ds   = PatchBrainCTDataset(val_records,   augment=False)
+    train_ds = PatchBrainCTDataset(train_records, augment=not args.no_augment, skull_strip=args.skull_strip, no_elastic=args.no_elastic)
+    val_ds   = PatchBrainCTDataset(val_records,   augment=False,               skull_strip=args.skull_strip)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=0, pin_memory=False)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=False)

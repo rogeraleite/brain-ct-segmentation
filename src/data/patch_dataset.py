@@ -5,7 +5,12 @@ import torch
 from torch.utils.data import Dataset
 
 from src.data.loader import load_nifti
-from src.preprocessing.transforms import augment_pair, normalize
+from src.preprocessing.transforms import (
+    BRAIN_HU_MIN,
+    augment_pair,
+    extract_intracranial_mask,
+    normalize,
+)
 
 # All volumes in this dataset share H=W=650.
 # D varies from 19 to 40 — we pad shorter volumes to D_MAX so the model
@@ -34,11 +39,15 @@ class PatchBrainCTDataset(Dataset):
         patch_hw: int = PATCH_HW,
         d_max: int = D_MAX,
         augment: bool = False,
+        skull_strip: bool = False,
+        no_elastic: bool = False,
     ) -> None:
         self.records = records
         self.patch_hw = patch_hw
         self.d_max = d_max
         self.augment = augment
+        self.skull_strip = skull_strip
+        self.no_elastic = no_elastic
 
     def __len__(self) -> int:
         return len(self.records)
@@ -49,9 +58,15 @@ class PatchBrainCTDataset(Dataset):
         volume, _ = load_nifti(r["image"])   # (D, H, W) native resolution
         mask, _   = load_nifti(r["mask"])
 
+        mask = (mask > 0.5).astype(np.uint8)
+
+        # Skull stripping must run on raw HU before normalization loses bone signal.
+        if self.skull_strip:
+            intracranial = extract_intracranial_mask(volume)
+            volume = np.where(intracranial, volume, BRAIN_HU_MIN)
+
         # Brain window + normalize to [0, 1] — no spatial resize
         volume = normalize(volume).astype(np.float32)
-        mask   = (mask > 0.5).astype(np.uint8)
 
         # Pad D to d_max (symmetric, zero-fill)
         volume, mask = _pad_depth(volume, mask, self.d_max)
@@ -73,7 +88,7 @@ class PatchBrainCTDataset(Dataset):
         mask   = mask[:,   h0:h0 + self.patch_hw, w0:w0 + self.patch_hw]
 
         if self.augment:
-            volume, mask = augment_pair(volume, mask)
+            volume, mask = augment_pair(volume, mask, p_elastic=0.0 if self.no_elastic else 0.5)
 
         x = torch.from_numpy(volume).unsqueeze(0)        # (1, D_MAX, PH, PW)
         y = torch.from_numpy(mask).float().unsqueeze(0)  # (1, D_MAX, PH, PW)

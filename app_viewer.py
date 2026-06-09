@@ -23,9 +23,10 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
+from streamlit_image_coordinates import streamlit_image_coordinates
 from scipy.ndimage import binary_closing, binary_fill_holes, zoom
 from skimage.measure import marching_cubes, find_contours
-from src.inference.sliding_window import _skull_exclusion_mask, _SKULL_HU_THRESH
+from src.inference.sliding_window import _skull_exclusion_mask, _extracranial_mask, _SKULL_HU_THRESH
 
 from src.data.loader import load_nifti
 from src.preprocessing.transforms import BRAIN_HU_MIN, BRAIN_HU_MAX, apply_brain_window
@@ -41,6 +42,7 @@ MASK_ALPHA = 0.40
 EXCL_COLOR = (220, 180, 50)
 EXCL_CONTOUR_COLOR = (255, 220, 50)
 EXCL_ALPHA = 0.40
+INNERSKULL_CONTOUR_COLOR = (50, 200, 220)
 GT_COLOR = (0, 200, 80)
 GT_ALPHA = 0.40
 CLICK_STEP = 8  # px between click-detection grid points
@@ -237,6 +239,8 @@ def build_plotly_2d(
     dragmode: str = "pan",
     gt_mask: np.ndarray | None = None,
     show_gt: bool = False,
+    innerskull_mask: np.ndarray | None = None,
+    show_innerskull: bool = False,
 ) -> go.Figure:
     arr = slice_to_uint8(volume, slice_idx)
     rgb = np.array(Image.fromarray(arr, mode="L").convert("RGB"), dtype=np.float32)
@@ -325,6 +329,19 @@ def build_plotly_2d(
                     showlegend=False, hoverinfo="skip",
                 ))
 
+    # Inner skull (intracranial boundary) contour
+    if show_innerskull and innerskull_mask is not None:
+        is_slice = innerskull_mask[slice_idx].astype(bool)
+        if is_slice.any():
+            for contour in find_contours(is_slice.astype(float), 0.5):
+                fig.add_trace(go.Scatter(
+                    x=contour[:, 1].tolist(), y=contour[:, 0].tolist(),
+                    mode="lines",
+                    line=dict(color=f"rgb{INNERSKULL_CONTOUR_COLOR}", width=2, dash="dot"),
+                    showlegend=False, hoverinfo="skip",
+                    name="Inner skull",
+                ))
+
     # Near-invisible grid — opacity>0 keeps SVG pointer-events active for click detection
     xs_g = list(range(0, w, CLICK_STEP))
     ys_g = list(range(0, h, CLICK_STEP))
@@ -349,7 +366,7 @@ def build_plotly_2d(
         yrange = [h - 0.5, -0.5]
 
     fig.update_layout(
-        uirevision=zoom,
+        uirevision=f"{zoom}_{dragmode}",
         dragmode=dragmode,
         clickmode="event+select",
         margin=dict(l=0, r=0, t=0, b=0),
@@ -698,6 +715,7 @@ with st.sidebar:
     show_area = False
     show_mask = False
     show_excl = False
+    show_innerskull = False
     show_gt = False
     slice_idx = 0
     endpoint = list(MODEL_OPTIONS.values())[0]
@@ -713,10 +731,14 @@ with st.sidebar:
             st.session_state.pop("hu_meshes", None)
             st.session_state.pop("excl_mask", None)
             st.session_state.pop("excl_mask_key", None)
+            st.session_state.pop("innerskull_mask", None)
             st.session_state["ts_file"] = filename
 
         try:
             volume, spacing = load_volume(file_bytes, filename)
+            if st.session_state.get("_slice_vol") != filename:
+                st.session_state["slice_idx"] = volume.shape[0] // 2
+                st.session_state["_slice_vol"] = filename
         except Exception as e:
             log(f"Error loading volume: {e}", level="ERROR")
             st.error(f"Error loading volume: {e}")
@@ -799,15 +821,16 @@ with st.sidebar:
         # ── View controls ──────────────────────────────────────────────────
         st.divider()
         show_mask = st.checkbox("Show segmentation overlay", value=True)
-        show_excl = st.checkbox("Show bone exclusion zone", value=False)
+        show_excl = st.checkbox("Show bone exclusion zone", value=True)
+        show_innerskull = st.checkbox("Show inner skull boundary", value=True)
         skull_excl_mm = st.slider(
             "Skull exclusion margin (mm)", 0.0, 15.0, SKULL_EXCL_MM,
             step=0.5, disabled=not show_excl,
             help="Inward margin from the inner skull surface. Updates the overlay and lesion volume in real time — no re-run needed.",
         )
-        show_gt = st.checkbox("Show ground truth", value=False, disabled=gt_mask_full is None)
-        show_area = st.checkbox("Show lesion area (slice)", value=False)
-        slice_idx = st.slider("Axial slice", 0, volume.shape[0] - 1, volume.shape[0] // 2)
+        show_gt = st.checkbox("Show ground truth", value=True, disabled=gt_mask_full is None)
+        show_area = st.checkbox("Show lesion area (slice)", value=True)
+        slice_idx = st.session_state.get("slice_idx", volume.shape[0] // 2)
 
         # Recompute exclusion mask whenever file or margin changes
         _excl_key = f"excl_{filename}_{skull_excl_mm}"
@@ -817,6 +840,10 @@ with st.sidebar:
                 volume, _SKULL_HU_THRESH, skull_excl_mm, spacing_hw_mm,
             )
             st.session_state["excl_mask_key"] = _excl_key
+
+        # Compute intracranial mask once per file (inverse of extracranial)
+        if "innerskull_mask" not in st.session_state:
+            st.session_state["innerskull_mask"] = ~_extracranial_mask(volume, _SKULL_HU_THRESH)
 
         if mask_full is not None:
             per_slice = mask_full.sum(axis=(1, 2))
@@ -922,6 +949,12 @@ with tab_viewer:
     col_2d, col_3d = st.columns([2, 3])
 
     with col_2d:
+        slice_idx = st.slider(
+            "Axial slice", 0, volume.shape[0] - 1,
+            st.session_state.get("slice_idx", volume.shape[0] // 2),
+            key="slice_idx",
+        )
+
         # Version badge above image
         if seg_result:
             model_ver = seg_result.get("model_version", "v1.0")
@@ -932,6 +965,45 @@ with tab_viewer:
         if _viewer_mode != st.session_state.get("_prev_viewer_mode"):
             st.session_state["_prev_viewer_mode"] = _viewer_mode
             st.session_state.pop("_last_sel", None)
+            st.session_state.pop("viewer_2d_sic", None)  # discard stale click from previous mode
+        _poly_pts = st.session_state.get("poly_points", [])
+        _poly_closed = st.session_state.get("poly_closed", False)
+
+        # Streamlit stores the component value in session_state[key] before the rerun
+        # fires, so we can process the click here — before build_frame() — and show
+        # the updated overlay in the same render pass. No st.rerun() needed.
+        _sic_click = st.session_state.get("viewer_2d_sic")
+        if _sic_click is not None and _viewer_mode != "Navigate":
+            _sel = (_sic_click["x"], _sic_click["y"])
+            if _sel != st.session_state.get("_last_sel"):
+                st.session_state["_last_sel"] = _sel
+                _new_pt = {"x": _sic_click["x"], "y": _sic_click["y"]}
+                if _viewer_mode == "Distance":
+                    _d_pts = st.session_state.get("points", [])
+                    if len(_d_pts) < 2:
+                        _d_pts.append(_new_pt)
+                    else:
+                        _d_pts[0] = _d_pts[1]
+                        _d_pts[1] = _new_pt
+                    st.session_state["points"] = _d_pts
+                elif _viewer_mode == "Area":
+                    if not _poly_closed:
+                        if len(_poly_pts) >= 3:
+                            _first = _poly_pts[0]
+                            _dist_px = math.sqrt(
+                                (_new_pt["x"] - _first["x"]) ** 2 +
+                                (_new_pt["y"] - _first["y"]) ** 2
+                            )
+                            if _dist_px <= CLOSE_THRESHOLD_PX:
+                                st.session_state["poly_closed"] = True
+                                _poly_closed = True
+                            else:
+                                _poly_pts.append(_new_pt)
+                                st.session_state["poly_points"] = _poly_pts
+                        else:
+                            _poly_pts.append(_new_pt)
+                            st.session_state["poly_points"] = _poly_pts
+        points = st.session_state["points"]
         _poly_pts = st.session_state.get("poly_points", [])
         _poly_closed = st.session_state.get("poly_closed", False)
 
@@ -942,25 +1014,39 @@ with tab_viewer:
             mask_filtered[_excl_arr] = 0
         else:
             mask_filtered = mask_full
-        fig_2d = build_plotly_2d(
-            volume, slice_idx, mask_filtered, show_mask,
-            points if _viewer_mode == "Distance" else [],
-            spacing,
-            excl_mask=_excl_arr,
-            show_excl=show_excl,
-            poly_points=_poly_pts if _viewer_mode == "Area" else None,
-            poly_closed=_poly_closed,
-            zoom=_zoom,
-            dragmode="pan" if _viewer_mode == "Navigate" else "select",
-            gt_mask=gt_mask_full,
-            show_gt=show_gt,
-        )
-        event = st.plotly_chart(
-            fig_2d, on_select="rerun", key="viewer_2d", use_container_width=True
-        )
+
+        if _viewer_mode == "Navigate":
+            # Plotly viewer for pan/zoom only — no click detection needed here
+            fig_2d = build_plotly_2d(
+                volume, slice_idx, mask_filtered, show_mask,
+                [], spacing,
+                excl_mask=_excl_arr, show_excl=show_excl,
+                poly_points=None, poly_closed=False,
+                zoom=_zoom, dragmode="pan",
+                gt_mask=gt_mask_full, show_gt=show_gt,
+                innerskull_mask=st.session_state.get("innerskull_mask"),
+                show_innerskull=show_innerskull,
+            )
+            st.plotly_chart(fig_2d, key="viewer_2d", use_container_width=True,
+                            config={"displayModeBar": False})
+            click_data = None
+        else:
+            # PIL viewer + streamlit_image_coordinates for reliable click detection
+            frame = build_frame(
+                volume, slice_idx, mask_filtered, show_mask,
+                points if _viewer_mode == "Distance" else [],
+                spacing,
+                excl_mask=_excl_arr, show_excl=show_excl,
+                poly_points=_poly_pts if _viewer_mode == "Area" else None,
+                poly_closed=_poly_closed,
+                gt_mask=gt_mask_full, show_gt=show_gt,
+            )
+            click_data = streamlit_image_coordinates(frame, key="viewer_2d_sic")
+
         _ctrl_left, _ctrl_mid, _ctrl_right = st.columns([2, 4, 2])
         _ctrl_left.select_slider("Zoom", options=[1, 2, 4, 8], key="_zoom_slider",
-                                 format_func=lambda x: f"{x}×")
+                                 format_func=lambda x: f"{x}×",
+                                 disabled=_viewer_mode != "Navigate")
         _ctrl_mid.radio("Mode", ["Navigate", "Distance", "Area"], horizontal=True,
                         key="_viewer_mode", label_visibility="collapsed")
         if _viewer_mode == "Distance":
@@ -981,38 +1067,6 @@ with tab_viewer:
                     st.session_state["poly_closed"] = False
                     st.session_state.pop("_last_sel", None)
                     st.rerun()
-
-        if event and event.selection and event.selection.points:
-            sel = event.selection.points[0]
-            new_pt = {"x": int(round(sel["x"])), "y": int(round(sel["y"]))}
-            current_sel = (new_pt["x"], new_pt["y"])
-            if current_sel != st.session_state.get("_last_sel"):
-                st.session_state["_last_sel"] = current_sel
-                if _viewer_mode == "Distance":
-                    if len(points) < 2:
-                        points.append(new_pt)
-                    else:
-                        points[0] = points[1]
-                        points[1] = new_pt
-                    st.session_state["points"] = points
-                elif _viewer_mode == "Area":
-                    if not _poly_closed:
-                        if len(_poly_pts) >= 3:
-                            first = _poly_pts[0]
-                            dist_px = math.sqrt(
-                                (new_pt["x"] - first["x"]) ** 2 +
-                                (new_pt["y"] - first["y"]) ** 2
-                            )
-                            if dist_px <= CLOSE_THRESHOLD_PX:
-                                st.session_state["poly_closed"] = True
-                            else:
-                                _poly_pts.append(new_pt)
-                                st.session_state["poly_points"] = _poly_pts
-                        else:
-                            _poly_pts.append(new_pt)
-                            st.session_state["poly_points"] = _poly_pts
-        elif event and event.selection and not event.selection.points:
-            st.session_state.pop("_last_sel", None)
 
         if _viewer_mode == "Distance":
             if len(points) == 0:
@@ -1068,7 +1122,7 @@ with tab_viewer:
             gt_mask=gt_mask_full,
             show_gt=show_gt,
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="viewer_3d")
 
 # ── Logs tab ───────────────────────────────────────────────────────────────────
 with tab_logs:
