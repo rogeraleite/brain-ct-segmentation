@@ -108,15 +108,12 @@ def _skull_exclusion_mask(
     spacing_hw: float,
 ) -> np.ndarray:
     """
-    Build a boolean mask covering the exclusion zone just inside the inner skull surface.
+    Build a boolean mask covering the exclusion zone just inside the skull boundary.
 
-    Per axial slice:
-    1. Detect bone (HU > bone_thresh).
-    2. Fill the skull ring interior → intracranial region (bone + brain).
-    3. Remove bone pixels → brain/intracranial space only.
-    4. Erode inward by excl_mm → brain space beyond the margin.
-    5. Exclusion zone = intracranial space minus eroded = band from the
-       inner skull surface inward by excl_mm.
+    For raw-HU volumes (max > 100 HU): uses the bone ring (HU > bone_thresh) to
+    define the skull boundary and erodes the intracranial space inward by excl_mm.
+    For brain-windowed volumes (max ≤ 100 HU): bone is clipped away, so the outer
+    boundary of the filled head region is used as the skull-ring proxy instead.
     """
     D, H, W = volume_hu.shape
 
@@ -125,14 +122,23 @@ def _skull_exclusion_mask(
     y_g, x_g = np.ogrid[:d, :d]
     circle2d = (y_g - radius_px) ** 2 + (x_g - radius_px) ** 2 <= radius_px ** 2
 
+    brain_windowed = float(volume_hu.max()) <= 100.0
+
     skull_zone = np.zeros((D, H, W), dtype=bool)
     for i in range(D):
         slc = volume_hu[i]
-        bone_mask = slc > bone_thresh
-        if not bone_mask.any():
-            continue
-        skull_filled = binary_fill_holes(bone_mask)   # bone ring + enclosed brain
-        intracranial = skull_filled & ~bone_mask       # intracranial space only
+        if brain_windowed:
+            # No bone signal: use the filled head boundary as skull-ring proxy.
+            head = slc > (BRAIN_HU_MIN + 1.0)
+            if not head.any():
+                continue
+            intracranial = binary_fill_holes(head)
+        else:
+            bone_mask = slc > bone_thresh
+            if not bone_mask.any():
+                continue
+            skull_filled = binary_fill_holes(bone_mask)
+            intracranial = skull_filled & ~bone_mask  # intracranial space only
         if not intracranial.any():
             continue
         eroded = binary_erosion(intracranial, structure=circle2d, border_value=0)
@@ -142,16 +148,22 @@ def _skull_exclusion_mask(
 
 def _extracranial_mask(volume_hu: np.ndarray, bone_thresh: float) -> np.ndarray:
     """
-    True wherever we are outside the filled skull (background, scalp, bone).
-    Slices with no bone are fully masked — model has nothing valid to predict there.
+    True wherever we are outside the head region (background/air).
+
+    For raw-HU volumes (max > 100 HU): detects the bone ring and fills it to
+    find the intracranial region.  For brain-windowed volumes (max ≤ 100 HU,
+    e.g. datasets normalised to [-5, 75]): bone information is gone, so we
+    detect non-air tissue instead (anything above BRAIN_HU_MIN + 1).
     """
     D, H, W = volume_hu.shape
     mask = np.ones((D, H, W), dtype=bool)
+    brain_windowed = float(volume_hu.max()) <= 100.0
+    detect_thresh = (BRAIN_HU_MIN + 1.0) if brain_windowed else bone_thresh
     for i in range(D):
-        bone = volume_hu[i] > bone_thresh
-        if not bone.any():
+        tissue = volume_hu[i] > detect_thresh
+        if not tissue.any():
             continue
-        mask[i] = ~binary_fill_holes(bone)
+        mask[i] = ~binary_fill_holes(tissue)
     return mask
 
 

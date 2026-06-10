@@ -47,7 +47,9 @@ def extract_intracranial_mask(volume_hu: np.ndarray) -> np.ndarray:
     for i in range(D):
         bone = volume_hu[i] > skull_thresh
         if bone.any():
-            mask[i] = binary_fill_holes(bone)
+            # Fill the skull ring to capture intracranial contents, then subtract
+            # the bone pixels themselves so only soft tissue remains.
+            mask[i] = binary_fill_holes(bone) & ~bone
     return mask
 
 

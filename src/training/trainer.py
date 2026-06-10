@@ -111,6 +111,7 @@ def train(
     device: torch.device,
     save_by: str = "dice",
     pos_weight: float = 1.0,
+    resume_path: str | None = None,
 ) -> dict:
     """
     Train model, save best checkpoint.
@@ -121,6 +122,9 @@ def train(
                empty patches inflate dice to 1.0 artificially)
 
     pos_weight: upweight lesion voxels in BCE (1.0 = standard, 50.0 = lesion 50× heavier).
+
+    resume_path: if provided, loads model + optimizer + scheduler + history from
+                 this checkpoint and continues training from the next epoch.
 
     Returns history dict with lists: train_loss, val_loss, val_dice.
     """
@@ -135,8 +139,20 @@ def train(
     history: dict[str, list[float]] = {"train_loss": [], "val_loss": [], "val_dice": []}
     best_dice = 0.0
     best_loss = float("inf")
+    start_epoch = 1
 
-    for epoch in range(1, epochs + 1):
+    if resume_path is not None:
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        history = ckpt.get("history", history)
+        best_dice = ckpt.get("val_dice", 0.0)
+        best_loss = ckpt.get("val_loss", float("inf"))
+        start_epoch = ckpt["epoch"] + 1
+        print(f"Resumed from {resume_path}  (epoch {ckpt['epoch']}, val_loss={best_loss:.4f}, val_dice={best_dice:.4f})")
+
+    for epoch in range(start_epoch, start_epoch + epochs):
         train_loss = train_one_epoch(model, train_loader, optimizer, device, pos_weight=pos_weight)
         val_loss, val_dice = evaluate(model, val_loader, device)
 
@@ -157,6 +173,9 @@ def train(
                 {
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "history": history,
                     "val_dice": val_dice,
                     "val_loss": val_loss,
                 },
@@ -165,7 +184,7 @@ def train(
             flag = " ← best"
 
         print(
-            f"Epoch {epoch:03d}/{epochs} | "
+            f"Epoch {epoch:03d} | "
             f"train_loss={train_loss:.4f} | "
             f"val_loss={val_loss:.4f} | "
             f"val_dice={val_dice:.4f}{flag}"

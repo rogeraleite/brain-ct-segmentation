@@ -53,6 +53,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skull-strip", action="store_true",
                         help="Zero out extracranial voxels before normalization")
     parser.add_argument("--pos-weight",  type=float, default=50.0)
+    parser.add_argument("--resume",      default=None,
+                        help="Path to checkpoint to resume training from")
     return parser.parse_args()
 
 
@@ -91,6 +93,7 @@ def main() -> None:
         device=device,
         save_by="loss",
         pos_weight=args.pos_weight,
+        resume_path=args.resume,
     )
 
     try:

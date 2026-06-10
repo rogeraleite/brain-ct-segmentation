@@ -60,6 +60,13 @@ MODEL_OPTIONS = {
     "Resize v1        — Dice 0.27 · 64×128×128        · ~3s":               "/segment/mresize",
 }
 
+MODEL_DEFAULT_THRESHOLD = {
+    "/segment/sw_v6":   0.30,
+    "/segment/sw":      0.50,
+    "/segment/sw_v5":   0.50,
+    "/segment/mresize": 0.50,
+}
+
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
 MASKS_DIR = os.path.join(_APP_DIR, "data", "raw", "masks")
 
@@ -791,8 +798,14 @@ with st.sidebar:
                 "SW v6 = patch-based estimate (ep78), SW v4 = epoch 79, SW v5 = epoch 74, Resize v1 = epoch 46._"
             )
 
+        _model_default_thresh = MODEL_DEFAULT_THRESHOLD.get(endpoint, 0.50)
+        if st.session_state.get("_thresh_endpoint") != endpoint:
+            st.session_state["_thresh_val"] = _model_default_thresh
+            st.session_state["_thresh_endpoint"] = endpoint
+        elif "_thresh_val" not in st.session_state:
+            st.session_state["_thresh_val"] = _model_default_thresh
         seg_threshold = st.slider(
-            "Prediction threshold", 0.05, 0.95, 0.50, step=0.05,
+            "Prediction threshold", 0.05, 0.95, step=0.05, key="_thresh_val",
             help="Probability cutoff for binarising model output. Lower values show more (weaker) predictions.",
         )
 
@@ -1094,6 +1107,39 @@ with tab_viewer:
                     st.session_state["poly_closed"] = False
                     st.session_state.pop("_last_sel", None)
                     st.rerun()
+
+        # ── Colour legend ─────────────────────────────────────────────────────
+        _legend_items = []
+        if show_mask and mask_filtered is not None and mask_filtered.any():
+            _legend_items.append(
+                f'<span style="display:inline-block;width:12px;height:12px;'
+                f'background:rgb{MASK_COLOR};border-radius:2px;margin-right:4px;vertical-align:middle"></span>'
+                f'<span style="vertical-align:middle">Prediction</span>'
+            )
+        if show_gt and gt_mask_full is not None:
+            _legend_items.append(
+                f'<span style="display:inline-block;width:12px;height:12px;'
+                f'background:rgb{GT_COLOR};border-radius:2px;margin-right:4px;vertical-align:middle"></span>'
+                f'<span style="vertical-align:middle">Ground truth</span>'
+            )
+        if show_excl and _excl_arr is not None:
+            _legend_items.append(
+                f'<span style="display:inline-block;width:12px;height:12px;'
+                f'background:rgb{EXCL_COLOR};border-radius:2px;margin-right:4px;vertical-align:middle"></span>'
+                f'<span style="vertical-align:middle">Bone exclusion</span>'
+            )
+        if show_innerskull and st.session_state.get("innerskull_mask") is not None:
+            _legend_items.append(
+                f'<span style="display:inline-block;width:22px;height:3px;'
+                f'background:rgb{INNERSKULL_CONTOUR_COLOR};margin-right:4px;vertical-align:middle"></span>'
+                f'<span style="vertical-align:middle">Inner skull</span>'
+            )
+        if _legend_items:
+            _legend_html = "&nbsp;&nbsp;".join(_legend_items)
+            st.markdown(
+                f'<p style="font-size:0.78rem;color:#aaa;margin:2px 0 6px 0">{_legend_html}</p>',
+                unsafe_allow_html=True,
+            )
 
         if _viewer_mode == "Distance":
             if len(points) == 0:
