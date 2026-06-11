@@ -54,14 +54,16 @@ POLY_FILL_ALPHA = 0.18
 CLOSE_THRESHOLD_PX = 15  # native pixels — click this close to P1 to auto-close
 
 MODEL_OPTIONS = {
-    "Sliding Window v7 — Dice ~0.30 · ep95 · ~20s":                            "/segment/sw_v7",
-    "Sliding Window v6 — Dice ~0.28 · no-elastic · bone excl post-inf · ~20s": "/segment/sw_v6",
-    "Sliding Window v4 — Dice 0.34 · native (650×650) · ~20s":             "/segment/sw",
-    "Sliding Window v5 — Dice 0.17 · + augment + bone suppression · ~20s": "/segment/sw_v5",
-    "Resize v1        — Dice 0.27 · 64×128×128        · ~3s":               "/segment/mresize",
+    "Sliding Window v8 — Dice 0.38 · ep132 · 3D skull excl · ~20s":             "/segment/sw_v8",
+    "Sliding Window v7 — Dice ~0.30 · ep95 · ~20s":                             "/segment/sw_v7",
+    "Sliding Window v6 — Dice ~0.28 · no-elastic · bone excl post-inf · ~20s":  "/segment/sw_v6",
+    "Sliding Window v4 — Dice 0.34 · native (650×650) · ~20s":                  "/segment/sw",
+    "Sliding Window v5 — Dice 0.17 · + augment + bone suppression · ~20s":      "/segment/sw_v5",
+    "Resize v1        — Dice 0.27 · 64×128×128        · ~3s":                   "/segment/mresize",
 }
 
 MODEL_DEFAULT_THRESHOLD = {
+    "/segment/sw_v8":   0.30,
     "/segment/sw_v7":   0.30,
     "/segment/sw_v6":   0.30,
     "/segment/sw":      0.50,
@@ -613,6 +615,8 @@ def build_3d_figure(
     full_head_mesh: tuple | None = None,
     gt_mask: np.ndarray | None = None,
     show_gt: bool = False,
+    lesion_mask: np.ndarray | None = None,
+    show_lesion: bool = True,
 ) -> go.Figure:
     """Render skull + brain (HU-based, clipped below slice) + CT texture at slice plane."""
     fig = go.Figure()
@@ -668,7 +672,20 @@ def build_3d_figure(
                 lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
             ))
 
-    # 5. CT slice — actual scan image as the cutting plane surface
+    # 5. Model lesion prediction — red surface (uses bone-excluded mask_filtered)
+    if show_lesion and lesion_mask is not None and lesion_mask.any():
+        lesion_result = compute_mesh(lesion_mask, spacing)
+        if lesion_result is not None:
+            lv, lf = lesion_result
+            fig.add_trace(go.Mesh3d(
+                x=lv[:, 2].tolist(), y=(H_mm - lv[:, 1]).tolist(), z=lv[:, 0].tolist(),
+                i=lf[:, 0].tolist(), j=lf[:, 1].tolist(), k=lf[:, 2].tolist(),
+                color="#DC3232", opacity=0.85,
+                name="Prediction", showlegend=True,
+                lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
+            ))
+
+    # 6. CT slice — actual scan image as the cutting plane surface
     if volume is not None:
         slc = volume[slice_idx].astype(np.float32)
         slc_win = np.clip(slc, BRAIN_HU_MIN, BRAIN_HU_MAX)
@@ -792,13 +809,14 @@ with st.sidebar:
             st.markdown(
                 "| Model | Dice | Resolution | Speed | Notes |\n"
                 "|---|---|---|---|---|\n"
+                "| **SW v8** | 0.377 | 650×650 native | ~20s | ep132 · 3D skull excl · dual ckpt · patience=10 |\n"
                 "| SW v7 | ~0.30 | 650×650 native | ~20s | ep95 |\n"
                 "| SW v6 | ~0.28 | 650×650 native | ~20s | no elastic aug, bone excl post-inference only |\n"
-                "| **SW v4** | 0.339 | 650×650 native | ~20s | lesion-centered 70/30, pos_weight=50 |\n"
+                "| SW v4 | 0.339 | 650×650 native | ~20s | lesion-centered 70/30, pos_weight=50 |\n"
                 "| SW v5 | 0.172 | 650×650 native | ~20s | + augment (rot/elastic/jitter) + bone suppression |\n"
                 "| Resize v1 | 0.272 | 64×128×128 | ~3s | baseline |\n\n"
                 "_Dice on validation set. "
-                "SW v7 = epoch 95, SW v6 = patch-based estimate (ep78), SW v4 = epoch 79, SW v5 = epoch 74, Resize v1 = epoch 46._"
+                "SW v8 = epoch 132 (dice ckpt), SW v7 = epoch 95, SW v6 = patch-based estimate (ep78), SW v4 = epoch 79, SW v5 = epoch 74, Resize v1 = epoch 46._"
             )
 
         _model_default_thresh = MODEL_DEFAULT_THRESHOLD.get(endpoint, 0.50)
@@ -1204,6 +1222,8 @@ with tab_viewer:
             full_head_mesh=st.session_state.get("ts_full_head"),
             gt_mask=gt_mask_full,
             show_gt=show_gt,
+            lesion_mask=mask_filtered,
+            show_lesion=show_mask,
         )
         st.plotly_chart(fig, use_container_width=True, key="viewer_3d")
 

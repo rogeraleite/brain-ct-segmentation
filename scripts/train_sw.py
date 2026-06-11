@@ -95,8 +95,9 @@ def main() -> None:
         resume_path=args.resume,
     )
 
+    curve_path = str(Path(args.save_path).parent.parent / "tmp" / (Path(args.save_path).stem + "_curves.png"))
     try:
-        show_training_curves(history["train_loss"], history["val_loss"], history["val_dice"])
+        show_training_curves(history["train_loss"], history["val_loss"], history["val_dice"], save_path=curve_path)
     except Exception:
         pass
 

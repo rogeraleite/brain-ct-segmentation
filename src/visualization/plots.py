@@ -55,8 +55,9 @@ def show_training_curves(
     train_losses: list[float],
     val_losses: list[float],
     val_dices: list[float],
+    save_path: str | None = None,
 ) -> None:
-    """Plot loss and Dice curves from training history."""
+    """Plot loss and Dice curves from training history. Saves to save_path if provided."""
     epochs = range(1, len(train_losses) + 1)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -84,7 +85,11 @@ def show_training_curves(
     ax2.legend()
 
     plt.tight_layout()
-    plt.show()
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Training curves saved to {save_path}")
+    else:
+        plt.show()
 
 
 def show_prediction(

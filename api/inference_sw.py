@@ -39,6 +39,7 @@ def predict_from_bytes_sw(
     threshold: float = 0.5,
     model_version: str = "sw-v4",
     skull_strip: bool = False,
+    skull_excl_mm: float = 3.0,
 ) -> dict:
     """
     End-to-end sliding-window inference from raw NIfTI bytes.
@@ -72,6 +73,7 @@ def predict_from_bytes_sw(
         stride=stride, threshold=threshold,
         spacing_hw_mm=spacing_hw_mm,
         skull_strip=skull_strip,
+        skull_excl_mm=skull_excl_mm,
     )
 
     # Volume: spacing is for the original resolution — no rescaling needed
