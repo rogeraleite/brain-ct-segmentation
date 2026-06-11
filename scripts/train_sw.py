@@ -41,7 +41,7 @@ def parse_args() -> argparse.Namespace:
         description="Train sliding-window Small3DUNet on native-resolution brain CT patches"
     )
     parser.add_argument("--data-root",  default="data/raw")
-    parser.add_argument("--save-path",  default="models/best_model_slidingWindow.pth")
+    parser.add_argument("--save-path",  default="models/best_model_slidingWindow_v8.pth")
     parser.add_argument("--epochs",     type=int,   default=100)
     parser.add_argument("--batch-size", type=int,   default=2)
     parser.add_argument("--lr",         type=float, default=1e-3)
@@ -91,7 +91,6 @@ def main() -> None:
         lr=args.lr,
         save_path=args.save_path,
         device=device,
-        save_by="loss",
         pos_weight=args.pos_weight,
         resume_path=args.resume,
     )

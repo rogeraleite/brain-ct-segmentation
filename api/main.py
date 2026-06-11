@@ -69,6 +69,15 @@ async def lifespan(app: FastAPI):
     except FileNotFoundError as e:
         logger.warning(f"SW v6 model not found: {e}. /segment/sw_v6 will return 503.")
 
+    logger.info("Loading Small3DUNet (sliding window v7) checkpoint...")
+    try:
+        model_sw_v7, device_sw_v7 = load_model_sw("models/best_model_slidingWindow_v7.pth")
+        _state["model_sw_v7"] = model_sw_v7
+        _state["device_sw_v7"] = device_sw_v7
+        logger.info(f"Sliding window v7 model loaded on {device_sw_v7}")
+    except FileNotFoundError as e:
+        logger.warning(f"SW v7 model not found: {e}. /segment/sw_v7 will return 503.")
+
     yield
     _state.clear()
     logger.info("Models unloaded.")
@@ -111,6 +120,7 @@ async def health() -> HealthResponse:
         model_sw_loaded="model_sw" in _state,
         model_sw_v5_loaded="model_sw_v5" in _state,
         model_sw_v6_loaded="model_sw_v6" in _state,
+        model_sw_v7_loaded="model_sw_v7" in _state,
     )
 
 
@@ -228,5 +238,31 @@ async def segment_sw_v6(
         )
     except Exception as exc:
         logger.exception("Prediction failed (/segment/sw_v6)")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
+    return SegmentationResponse(**result)
+
+
+@app.post(
+    "/segment/sw_v7",
+    response_model=SegmentationResponse,
+    summary="Segment lesion — sliding window model (v7)",
+    response_description="Binary mask + volume (mL) + hemisphere. Native H×W resolution.",
+)
+async def segment_sw_v7(
+    file: UploadFile = File(...),
+    threshold: float = Query(default=0.5, ge=0.0, le=1.0),
+) -> SegmentationResponse:
+    if "model_sw_v7" not in _state:
+        raise HTTPException(status_code=503, detail="SW v7 model not loaded. Check models/best_model_slidingWindow_v7.pth.")
+    file_bytes = await file.read()
+    _validate_upload(file, file_bytes)
+    try:
+        result = predict_from_bytes_sw(
+            file_bytes, _state["model_sw_v7"], _state["device_sw_v7"],
+            model_version="sw-v7",
+            threshold=threshold,
+        )
+    except Exception as exc:
+        logger.exception("Prediction failed (/segment/sw_v7)")
         raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
     return SegmentationResponse(**result)

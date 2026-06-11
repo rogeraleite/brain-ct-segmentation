@@ -122,9 +122,9 @@ def show_prediction(
     if true_mask is not None:
         axes[2].imshow(volume[slice_idx], cmap="gray", origin="lower")
         gt_overlay = np.zeros((*true_mask[slice_idx].shape, 4), dtype=np.float32)
-        gt_overlay[true_mask[slice_idx] > 0] = [1.0, 0.0, 0.0, 0.4]
+        gt_overlay[true_mask[slice_idx] > 0] = [0.0, 0.9, 0.2, 0.5]
         axes[2].imshow(gt_overlay, origin="lower")
-        axes[2].set_title("Ground truth (red)")
+        axes[2].set_title("Ground truth (green)")
         axes[2].axis("off")
 
     plt.tight_layout()

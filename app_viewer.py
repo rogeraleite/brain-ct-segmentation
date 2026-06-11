@@ -54,6 +54,7 @@ POLY_FILL_ALPHA = 0.18
 CLOSE_THRESHOLD_PX = 15  # native pixels — click this close to P1 to auto-close
 
 MODEL_OPTIONS = {
+    "Sliding Window v7 — Dice ~0.30 · ep95 · ~20s":                            "/segment/sw_v7",
     "Sliding Window v6 — Dice ~0.28 · no-elastic · bone excl post-inf · ~20s": "/segment/sw_v6",
     "Sliding Window v4 — Dice 0.34 · native (650×650) · ~20s":             "/segment/sw",
     "Sliding Window v5 — Dice 0.17 · + augment + bone suppression · ~20s": "/segment/sw_v5",
@@ -61,6 +62,7 @@ MODEL_OPTIONS = {
 }
 
 MODEL_DEFAULT_THRESHOLD = {
+    "/segment/sw_v7":   0.30,
     "/segment/sw_v6":   0.30,
     "/segment/sw":      0.50,
     "/segment/sw_v5":   0.50,
@@ -624,7 +626,7 @@ def build_3d_figure(
     if full_head_mesh is not None:
         v, f = full_head_mesh
         fig.add_trace(go.Mesh3d(
-            x=v[:, 2].tolist(), y=v[:, 1].tolist(), z=v[:, 0].tolist(),
+            x=v[:, 2].tolist(), y=(H_mm - v[:, 1]).tolist(), z=v[:, 0].tolist(),
             i=f[:, 0].tolist(), j=f[:, 1].tolist(), k=f[:, 2].tolist(),
             color="#C8BAA0", opacity=0.07,
             name="Volume (TS)", showlegend=True,
@@ -635,7 +637,7 @@ def build_3d_figure(
     if "skull" in hu_meshes:
         sv, sf = hu_meshes["skull"]
         fig.add_trace(go.Mesh3d(
-            x=sv[:, 2].tolist(), y=sv[:, 1].tolist(), z=sv[:, 0].tolist(),
+            x=sv[:, 2].tolist(), y=(H_mm - sv[:, 1]).tolist(), z=sv[:, 0].tolist(),
             i=sf[:, 0].tolist(), j=sf[:, 1].tolist(), k=sf[:, 2].tolist(),
             color="#D4C5A0", opacity=0.18,
             name="Skull (HU>400)", showlegend=True,
@@ -646,7 +648,7 @@ def build_3d_figure(
     if "brain" in hu_meshes:
         bv, bf = hu_meshes["brain"]
         fig.add_trace(go.Mesh3d(
-            x=bv[:, 2].tolist(), y=bv[:, 1].tolist(), z=bv[:, 0].tolist(),
+            x=bv[:, 2].tolist(), y=(H_mm - bv[:, 1]).tolist(), z=bv[:, 0].tolist(),
             i=bf[:, 0].tolist(), j=bf[:, 1].tolist(), k=bf[:, 2].tolist(),
             color="#E8A4A4", opacity=0.40,
             name="Brain (HU 20–80)", showlegend=True,
@@ -659,7 +661,7 @@ def build_3d_figure(
         if gt_result is not None:
             gv, gf = gt_result
             fig.add_trace(go.Mesh3d(
-                x=gv[:, 2].tolist(), y=gv[:, 1].tolist(), z=gv[:, 0].tolist(),
+                x=gv[:, 2].tolist(), y=(H_mm - gv[:, 1]).tolist(), z=gv[:, 0].tolist(),
                 i=gf[:, 0].tolist(), j=gf[:, 1].tolist(), k=gf[:, 2].tolist(),
                 color="#00C850", opacity=0.70,
                 name="Ground truth", showlegend=True,
@@ -677,7 +679,7 @@ def build_3d_figure(
         slc_ds = slc_norm[::step_h, ::step_w]
         Hd, Wd = slc_ds.shape
         xs = np.linspace(0.0, W_mm, Wd)
-        ys = np.linspace(0.0, H_mm, Hd)
+        ys = np.linspace(H_mm, 0.0, Hd)
         Z = np.full((Hd, Wd), z_mm)
         fig.add_trace(go.Surface(
             x=xs.tolist(), y=ys.tolist(), z=Z.tolist(),
@@ -790,12 +792,13 @@ with st.sidebar:
             st.markdown(
                 "| Model | Dice | Resolution | Speed | Notes |\n"
                 "|---|---|---|---|---|\n"
+                "| SW v7 | ~0.30 | 650×650 native | ~20s | ep95 |\n"
                 "| SW v6 | ~0.28 | 650×650 native | ~20s | no elastic aug, bone excl post-inference only |\n"
                 "| **SW v4** | 0.339 | 650×650 native | ~20s | lesion-centered 70/30, pos_weight=50 |\n"
                 "| SW v5 | 0.172 | 650×650 native | ~20s | + augment (rot/elastic/jitter) + bone suppression |\n"
                 "| Resize v1 | 0.272 | 64×128×128 | ~3s | baseline |\n\n"
                 "_Dice on validation set. "
-                "SW v6 = patch-based estimate (ep78), SW v4 = epoch 79, SW v5 = epoch 74, Resize v1 = epoch 46._"
+                "SW v7 = epoch 95, SW v6 = patch-based estimate (ep78), SW v4 = epoch 79, SW v5 = epoch 74, Resize v1 = epoch 46._"
             )
 
         _model_default_thresh = MODEL_DEFAULT_THRESHOLD.get(endpoint, 0.50)
@@ -870,6 +873,7 @@ with st.sidebar:
         # Compute intracranial mask once per file (inverse of extracranial)
         if "innerskull_mask" not in st.session_state:
             st.session_state["innerskull_mask"] = ~_extracranial_mask(volume, _SKULL_HU_THRESH)
+            st.session_state["bone_mask"] = (volume > _SKULL_HU_THRESH).astype(bool)
 
         if mask_full is not None:
             per_slice = mask_full.sum(axis=(1, 2))
@@ -1030,9 +1034,15 @@ with tab_viewer:
 
         _zoom = st.session_state.get("_zoom_slider", 1)
         _excl_arr = st.session_state.get("excl_mask")
+        _bone_arr = st.session_state.get("bone_mask")
+        # Visual overlay: fill the full bone ring (between yellow and blue lines) + inner margin
+        if _excl_arr is not None and _bone_arr is not None:
+            _excl_display = _excl_arr | _bone_arr
+        else:
+            _excl_display = _excl_arr
         if show_excl and mask_full is not None and _excl_arr is not None:
             mask_filtered = mask_full.copy()
-            mask_filtered[_excl_arr] = 0
+            mask_filtered[_excl_display] = 0
         else:
             mask_filtered = mask_full
 
@@ -1041,7 +1051,7 @@ with tab_viewer:
             fig_2d = build_plotly_2d(
                 volume, slice_idx, mask_filtered, show_mask,
                 [], spacing,
-                excl_mask=_excl_arr, show_excl=show_excl,
+                excl_mask=_excl_display, show_excl=show_excl,
                 poly_points=None, poly_closed=False,
                 zoom=_zoom, dragmode="pan",
                 gt_mask=gt_mask_full, show_gt=show_gt,
@@ -1066,7 +1076,7 @@ with tab_viewer:
                 volume, slice_idx, mask_filtered, show_mask,
                 points if _viewer_mode == "Distance" else [],
                 spacing,
-                excl_mask=_excl_arr, show_excl=show_excl,
+                excl_mask=_excl_display, show_excl=show_excl,
                 poly_points=_poly_pts if _viewer_mode == "Area" else None,
                 poly_closed=_poly_closed,
                 gt_mask=gt_mask_full, show_gt=show_gt,

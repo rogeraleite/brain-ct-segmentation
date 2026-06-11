@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -109,17 +111,15 @@ def train(
     lr: float,
     save_path: str,
     device: torch.device,
-    save_by: str = "dice",
     pos_weight: float = 1.0,
     resume_path: str | None = None,
 ) -> dict:
     """
-    Train model, save best checkpoint.
+    Train model, save two checkpoints independently:
+      save_path          — best val_loss  (e.g. v8.pth)
+      save_path + _dice  — best val_dice  (e.g. v8_dice.pth)
 
-    save_by:
-      "dice" — save when val_dice improves (default, good for full-volume eval)
-      "loss" — save when val_loss improves (better for patch-based eval where
-               empty patches inflate dice to 1.0 artificially)
+    Scheduler always steps on val_loss (more stable than noisy patch-based dice).
 
     pos_weight: upweight lesion voxels in BCE (1.0 = standard, 50.0 = lesion 50× heavier).
 
@@ -130,15 +130,18 @@ def train(
     """
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
 
-    # Scheduler mode depends on criterion: maximise dice or minimise loss
-    sched_mode = "max" if save_by == "dice" else "min"
+    # Always step scheduler on loss (more stable than noisy patch-based dice)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode=sched_mode, factor=0.5, patience=5
+        optimizer, mode="min", factor=0.5, patience=10
     )
 
+    # Dice checkpoint path: v8.pth → v8_dice.pth
+    _p = Path(save_path)
+    dice_save_path = str(_p.parent / (_p.stem + "_dice" + _p.suffix))
+
     history: dict[str, list[float]] = {"train_loss": [], "val_loss": [], "val_dice": []}
-    best_dice = 0.0
     best_loss = float("inf")
+    best_dice = 0.0
     start_epoch = 1
 
     if resume_path is not None:
@@ -147,8 +150,8 @@ def train(
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         history = ckpt.get("history", history)
-        best_dice = ckpt.get("val_dice", 0.0)
         best_loss = ckpt.get("val_loss", float("inf"))
+        best_dice = ckpt.get("val_dice", 0.0)
         start_epoch = ckpt["epoch"] + 1
         print(f"Resumed from {resume_path}  (epoch {ckpt['epoch']}, val_loss={best_loss:.4f}, val_dice={best_dice:.4f})")
 
@@ -156,18 +159,15 @@ def train(
         train_loss = train_one_epoch(model, train_loader, optimizer, device, pos_weight=pos_weight)
         val_loss, val_dice = evaluate(model, val_loader, device)
 
-        scheduler.step(val_dice if save_by == "dice" else val_loss)
+        scheduler.step(val_loss)
 
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["val_dice"].append(val_dice)
 
-        improved = (save_by == "dice" and val_dice > best_dice) or \
-                   (save_by == "loss" and val_loss < best_loss)
-
         flag = ""
-        if improved:
-            best_dice = val_dice
+
+        if val_loss < best_loss:
             best_loss = val_loss
             torch.save(
                 {
@@ -181,7 +181,23 @@ def train(
                 },
                 save_path,
             )
-            flag = " ← best"
+            flag += " ← best_loss"
+
+        if val_dice > best_dice:
+            best_dice = val_dice
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "history": history,
+                    "val_dice": val_dice,
+                    "val_loss": val_loss,
+                },
+                dice_save_path,
+            )
+            flag += " ← best_dice"
 
         print(
             f"Epoch {epoch:03d} | "
@@ -190,6 +206,5 @@ def train(
             f"val_dice={val_dice:.4f}{flag}"
         )
 
-    best_label = f"val_loss={best_loss:.4f}" if save_by == "loss" else f"val_dice={best_dice:.4f}"
-    print(f"\nTraining complete. Best {best_label}  (save_by='{save_by}')")
+    print(f"\nTraining complete.  best_loss={best_loss:.4f} ({save_path})  |  best_dice={best_dice:.4f} ({dice_save_path})")
     return history
