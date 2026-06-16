@@ -3,6 +3,15 @@ import numpy as np
 from pathlib import Path
 
 
+def load_skull_mask(path: str) -> np.ndarray:
+    """Load a SAM-generated skull mask NIfTI. Returns bool (D, H, W)."""
+    img = nib.load(path)
+    arr = img.get_fdata().astype(np.float32)
+    if arr.ndim == 3:
+        arr = np.transpose(arr, (2, 0, 1))  # nibabel (H,W,D) → (D,H,W)
+    return arr > 0.5
+
+
 def load_nifti(path: str) -> tuple[np.ndarray, np.ndarray]:
     """
     Load a NIfTI file.

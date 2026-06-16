@@ -51,7 +51,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-elastic",  action="store_true",
                         help="Disable elastic deformation augmentation")
     parser.add_argument("--skull-strip", action="store_true",
-                        help="Zero out extracranial voxels before normalization")
+                        help="Zero out extracranial voxels before normalization (old HU-threshold method)")
+    parser.add_argument("--skull-mask-dir", default=None,
+                        help="Directory with precomputed SAM skull masks (e.g. data/skull_masks). "
+                             "When provided, overrides --skull-strip with accurate per-case masks.")
     parser.add_argument("--pos-weight",  type=float, default=50.0)
     parser.add_argument("--resume",      default=None,
                         help="Path to checkpoint to resume training from")
@@ -70,8 +73,16 @@ def main() -> None:
     )
     print(f"Dataset     : {len(records)} total | {len(train_records)} train | {len(val_records)} val")
 
-    train_ds = PatchBrainCTDataset(train_records, augment=not args.no_augment, skull_strip=args.skull_strip, no_elastic=args.no_elastic)
-    val_ds   = PatchBrainCTDataset(val_records,   augment=False,               skull_strip=args.skull_strip)
+    train_ds = PatchBrainCTDataset(
+        train_records, augment=not args.no_augment,
+        skull_strip=args.skull_strip, no_elastic=args.no_elastic,
+        skull_mask_dir=args.skull_mask_dir,
+    )
+    val_ds = PatchBrainCTDataset(
+        val_records, augment=False,
+        skull_strip=args.skull_strip,
+        skull_mask_dir=args.skull_mask_dir,
+    )
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=0, pin_memory=False)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=0, pin_memory=False)

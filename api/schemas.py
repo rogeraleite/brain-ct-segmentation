@@ -10,6 +10,9 @@ class HealthResponse(BaseModel):
     model_sw_v6_loaded: bool = False
     model_sw_v7_loaded: bool = False
     model_sw_v8_loaded: bool = False
+    model_sw_v9_loaded: bool = False
+    model_sw_v10_loaded: bool = False
+    model_sw_v11_loaded: bool = False
 
 
 class SegmentationResponse(BaseModel):

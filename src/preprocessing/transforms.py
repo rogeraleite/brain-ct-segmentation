@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.ndimage import binary_fill_holes, gaussian_filter, map_coordinates, rotate, zoom
+from scipy.ndimage import binary_dilation, binary_fill_holes, gaussian_filter, label as nd_label, map_coordinates, rotate, zoom
 
 # Brain soft-tissue window.
 # This range captures the clinically relevant structures:
@@ -50,6 +50,73 @@ def extract_intracranial_mask(volume_hu: np.ndarray) -> np.ndarray:
             # Fill the skull ring to capture intracranial contents, then subtract
             # the bone pixels themselves so only soft tissue remains.
             mask[i] = binary_fill_holes(bone) & ~bone
+    return mask
+
+
+def extract_intracranial_mask_cc(volume_hu: np.ndarray) -> np.ndarray:
+    """
+    Return a bool (D, H, W) mask that is True inside the skull ring.
+
+    Handles two failure modes of the naive HU-threshold approach:
+      1. Hemorrhage exclusion: bright pixels (75 HU) include both skull bone and
+         hemorrhage in brain-windowed data. CCs are used to isolate the skull ring
+         (border-touching CCs preferred; largest CC as fallback).
+      2. Ring gaps: the skull ring may have small intensity gaps that break
+         binary_fill_holes. A 3-pixel dilation bridges these gaps before filling;
+         the original (un-dilated) skull ring is subtracted so only soft tissue
+         inside the ring is masked True.
+
+    The intracranial region is defined as: filled(dilated_skull_ring) & ~skull_ring.
+    """
+    vol_max = float(volume_hu.max())
+    skull_thresh = _SKULL_BONE_HU if vol_max > 100.0 else BRAIN_HU_MIN + 0.85 * (BRAIN_HU_MAX - BRAIN_HU_MIN)
+
+    D, H, W = volume_hu.shape
+    mask = np.zeros((D, H, W), dtype=bool)
+    for i in range(D):
+        bone = volume_hu[i] > skull_thresh
+        if not bone.any():
+            continue
+        labeled, n_cc = nd_label(bone)
+        if n_cc == 0:
+            continue
+
+        # Identify the skull ring: prefer CCs that touch the image border (the skull
+        # always encircles the head and reaches the field-of-view boundary), fall back
+        # to the largest CC when the head is fully contained within the image.
+        border_labels = set(
+            labeled[0, :].ravel().tolist() +
+            labeled[-1, :].ravel().tolist() +
+            labeled[:, 0].ravel().tolist() +
+            labeled[:, -1].ravel().tolist()
+        ) - {0}
+        if not border_labels:
+            counts = np.bincount(labeled.ravel())
+            counts[0] = 0
+            border_labels = {int(np.argmax(counts))}
+        skull_ring = np.isin(labeled, list(border_labels))
+
+        # Dilate the skull ring slightly to close compression/threshold gaps before
+        # filling, then subtract the ORIGINAL (un-dilated) ring so that interior
+        # bright pixels (hemorrhage) are not removed from the mask.
+        skull_dilated = binary_dilation(skull_ring, iterations=5)
+        filled = binary_fill_holes(skull_dilated)
+        candidate = filled & ~skull_ring
+
+        # Fallback for highly fragmented skull rings (skull-base / open ring slices):
+        # if the filled region is suspiciously small (<5% of image), derive the
+        # intracranial region from brain parenchyma directly.  Brain tissue (0–63 HU)
+        # forms one large connected blob; filling it captures hemorrhage holes inside.
+        if candidate.sum() < 0.05 * H * W:
+            tissue = (volume_hu[i] > (BRAIN_HU_MIN + 1.0)) & ~bone
+            if tissue.any():
+                lab_t, _ = nd_label(tissue)
+                cnt_t = np.bincount(lab_t.ravel())
+                cnt_t[0] = 0
+                brain_cc = lab_t == int(np.argmax(cnt_t))
+                candidate = binary_fill_holes(brain_cc)
+
+        mask[i] = candidate
     return mask
 
 

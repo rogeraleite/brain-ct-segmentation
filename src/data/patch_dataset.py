@@ -1,14 +1,15 @@
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from src.data.loader import load_nifti
+from src.data.loader import load_nifti, load_skull_mask
 from src.preprocessing.transforms import (
     BRAIN_HU_MIN,
     augment_pair,
-    extract_intracranial_mask,
+    extract_intracranial_mask_cc,
     normalize,
 )
 
@@ -41,6 +42,7 @@ class PatchBrainCTDataset(Dataset):
         augment: bool = False,
         skull_strip: bool = False,
         no_elastic: bool = False,
+        skull_mask_dir: str | None = None,
     ) -> None:
         self.records = records
         self.patch_hw = patch_hw
@@ -48,6 +50,7 @@ class PatchBrainCTDataset(Dataset):
         self.augment = augment
         self.skull_strip = skull_strip
         self.no_elastic = no_elastic
+        self.skull_mask_dir = Path(skull_mask_dir) if skull_mask_dir else None
 
     def __len__(self) -> int:
         return len(self.records)
@@ -61,8 +64,13 @@ class PatchBrainCTDataset(Dataset):
         mask = (mask > 0.5).astype(np.uint8)
 
         # Skull stripping must run on raw HU before normalization loses bone signal.
-        if self.skull_strip:
-            intracranial = extract_intracranial_mask(volume)
+        if self.skull_mask_dir is not None:
+            mask_path = self.skull_mask_dir / Path(r["image"]).name
+            if mask_path.exists():
+                intracranial = load_skull_mask(str(mask_path))
+                volume = np.where(intracranial, volume, BRAIN_HU_MIN)
+        elif self.skull_strip:
+            intracranial = extract_intracranial_mask_cc(volume)
             volume = np.where(intracranial, volume, BRAIN_HU_MIN)
 
         # Brain window + normalize to [0, 1] — no spatial resize

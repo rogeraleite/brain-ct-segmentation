@@ -12,7 +12,7 @@ import torch.nn as nn
 from scipy.ndimage import binary_erosion, binary_fill_holes
 
 from src.data.patch_dataset import D_MAX, PATCH_HW, _pad_depth
-from src.preprocessing.transforms import normalize, extract_intracranial_mask, BRAIN_HU_MIN, BRAIN_HU_MAX
+from src.preprocessing.transforms import normalize, extract_intracranial_mask_cc, BRAIN_HU_MIN, BRAIN_HU_MAX
 
 # HU threshold for bone detection in raw-CT volumes.
 _SKULL_HU_THRESH: float = 300.0
@@ -60,9 +60,11 @@ def sliding_window_predict(
     """
     D, H, W = volume.shape
 
-    # Skull stripping must run on raw HU before normalize() loses bone signal.
+    # Skull stripping: uses largest-CC to identify the skull ring, which avoids
+    # falsely excluding hemorrhage (also bright at 75 HU in brain-windowed data).
+    intracranial: np.ndarray | None = None
     if skull_strip:
-        intracranial = extract_intracranial_mask(volume)
+        intracranial = extract_intracranial_mask_cc(volume)
         volume = np.where(intracranial, volume, BRAIN_HU_MIN)
 
     # Normalize (brain window + [0,1]) — no spatial resize
@@ -94,13 +96,18 @@ def sliding_window_predict(
     prob_avg = prob_sum / np.maximum(count, 1e-6)
     prob_orig = prob_avg[pad_before:pad_before + D]  # back to original D
 
-    # Skull exclusion: zero out predictions near dense bone
-    if skull_excl_mm > 0.0:
+    # Skull exclusion: zero out predictions near dense bone (only when skull not already stripped)
+    if skull_excl_mm > 0.0 and intracranial is None:
         excl = _skull_exclusion_mask(volume, _SKULL_HU_THRESH, skull_excl_mm, spacing_hw_mm)
         prob_orig[excl] = 0.0
 
-    # Always zero out predictions outside the intracranial region (background + scalp)
-    prob_orig[_extracranial_mask(volume, _SKULL_HU_THRESH)] = 0.0
+    # Zero out predictions outside the intracranial region.
+    # If skull was stripped via CC mask, reuse that mask directly — avoids the bug where
+    # _extracranial_mask mis-identifies hemorrhage (75 HU) as the bone ring.
+    if intracranial is not None:
+        prob_orig[~intracranial] = 0.0
+    else:
+        prob_orig[_extracranial_mask(volume, _SKULL_HU_THRESH)] = 0.0
 
     return (prob_orig >= threshold).astype(np.uint8)
 
