@@ -85,7 +85,7 @@ def main() -> None:
 
     # ── Plot curves (non-blocking, skip in headless envs) ─────────────────────
     try:
-        show_training_curves(history["train_loss"], history["val_loss"], history["val_dice"])
+        show_training_curves(history["train_loss"], history["val_loss"], history["val_f1"])
     except Exception:
         pass  # headless / no display
 

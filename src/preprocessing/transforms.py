@@ -191,6 +191,7 @@ def augment_pair(
     volume: np.ndarray,
     mask: np.ndarray,
     p_flip: float = 0.5,
+    p_lateral_flip: float = 0.5,
     p_rotate: float = 0.5,
     max_angle: float = 10.0,
     p_elastic: float = 0.5,
@@ -210,10 +211,21 @@ def augment_pair(
     are possible — e.g. a flipped + rotated + jittered sample in one call.
     Geometric transforms (flip, rotate, elastic) are applied to both arrays;
     intensity jitter is volume-only.
+
+    Axis convention (RAS volumes, after the loader's transpose to D,H,W):
+      axis 0 = D = Superior-Inferior
+      axis 1 = H = Left-Right        ← lateral flip (anatomically valid mirror)
+      axis 2 = W = Anterior-Posterior
+    `p_flip` flips the S-I axis (legacy v4-v13 behaviour); `p_lateral_flip`
+    mirrors L-R, which is label-preserving for a bilaterally symmetric brain
+    and is the augmentation added in v14.
     """
     if np.random.random() < p_flip:
         volume = volume[::-1].copy()
         mask = mask[::-1].copy()
+    if np.random.random() < p_lateral_flip:
+        volume = volume[:, ::-1, :].copy()
+        mask = mask[:, ::-1, :].copy()
     if np.random.random() < p_rotate:
         volume, mask = _rotate_pair(volume, mask, max_angle)
     if np.random.random() < p_elastic:

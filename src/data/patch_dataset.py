@@ -42,6 +42,7 @@ class PatchBrainCTDataset(Dataset):
         augment: bool = False,
         skull_strip: bool = False,
         no_elastic: bool = False,
+        no_lateral_flip: bool = False,
         skull_mask_dir: str | None = None,
     ) -> None:
         self.records = records
@@ -50,6 +51,7 @@ class PatchBrainCTDataset(Dataset):
         self.augment = augment
         self.skull_strip = skull_strip
         self.no_elastic = no_elastic
+        self.no_lateral_flip = no_lateral_flip
         self.skull_mask_dir = Path(skull_mask_dir) if skull_mask_dir else None
 
     def __len__(self) -> int:
@@ -96,7 +98,11 @@ class PatchBrainCTDataset(Dataset):
         mask   = mask[:,   h0:h0 + self.patch_hw, w0:w0 + self.patch_hw]
 
         if self.augment:
-            volume, mask = augment_pair(volume, mask, p_elastic=0.0 if self.no_elastic else 0.5)
+            volume, mask = augment_pair(
+                volume, mask,
+                p_elastic=0.0 if self.no_elastic else 0.5,
+                p_lateral_flip=0.0 if self.no_lateral_flip else 0.5,
+            )
 
         x = torch.from_numpy(volume).unsqueeze(0)        # (1, D_MAX, PH, PW)
         y = torch.from_numpy(mask).float().unsqueeze(0)  # (1, D_MAX, PH, PW)
