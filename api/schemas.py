@@ -35,3 +35,23 @@ class SegmentationResponse(BaseModel):
         description="Base64-encoded uint8 numpy array of the binary segmentation mask (row-major)"
     )
     model_version: str = "v1.0"
+
+
+class CascadeSegmentationResponse(SegmentationResponse):
+    """v15 detect-then-segment response: the standard segmentation fields plus
+    the Stage-1 detector verdict. When hemorrhage_detected is False the mask is
+    empty by design (the gate suppressed segmentation on a scan the detector
+    judged lesion-free)."""
+
+    hemorrhage_detected: bool = Field(
+        description="Stage-1 verdict: did the detector flag hemorrhage in this scan?"
+    )
+    case_probability: float = Field(
+        description="Case-level P(hemorrhage) = max detector probability over all slices"
+    )
+    case_threshold: float = Field(
+        description="Gate threshold; case_probability >= this triggers segmentation"
+    )
+    slice_probabilities: list[float] = Field(
+        description="Per-axial-slice detector probability (ensemble mean over folds), index = D"
+    )

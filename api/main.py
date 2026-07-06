@@ -18,7 +18,8 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 
 from api.inference import load_model, predict_from_bytes
 from api.inference_sw import load_model_sw, predict_from_bytes_sw
-from api.schemas import HealthResponse, SegmentationResponse
+from api.inference_cascade import load_detectors, predict_cascade_from_bytes
+from api.schemas import CascadeSegmentationResponse, HealthResponse, SegmentationResponse
 
 SAMPLE_SCAN = Path(__file__).parent.parent / "data" / "sample" / "demo.nii.gz"
 
@@ -113,6 +114,18 @@ async def lifespan(app: FastAPI):
         logger.info(f"Sliding window v11 model loaded on {device_sw_v11}")
     except FileNotFoundError as e:
         logger.warning(f"SW v11 model not found: {e}. /segment/sw_v11 will return 503.")
+
+    logger.info("Loading v15 detect-then-segment cascade (detector ensemble + v14 segmenter)...")
+    try:
+        detectors, det_device = load_detectors()
+        _state["detectors_v15"] = detectors
+        _state["det_device_v15"] = det_device
+        seg_v14, seg_device_v14 = load_model_sw("models/best_model_slidingWindow_v14_fold0_f1.pth")
+        _state["seg_v14"] = seg_v14
+        _state["seg_device_v14"] = seg_device_v14
+        logger.info(f"v15 cascade loaded: {len(detectors)} fold detectors + v14 segmenter on {det_device}")
+    except FileNotFoundError as e:
+        logger.warning(f"v15 cascade not fully available: {e}. /segment/sw_v15 will return 503.")
 
     yield
     _state.clear()
@@ -387,3 +400,39 @@ async def segment_sw_v10(
         logger.exception("Prediction failed (/segment/sw_v10)")
         raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
     return SegmentationResponse(**result)
+
+
+@app.post(
+    "/segment/sw_v15",
+    response_model=CascadeSegmentationResponse,
+    summary="Detect-then-segment cascade (v15): slice detector gates the v14 segmenter",
+    response_description=(
+        "Segmentation mask + the Stage-1 detector verdict. If no hemorrhage is "
+        "detected the mask is empty by design (false-positive suppression)."
+    ),
+)
+async def segment_sw_v15(
+    file: UploadFile = File(...),
+    threshold: float = Query(default=0.3, ge=0.0, le=1.0),
+    case_threshold: float = Query(default=0.5, ge=0.0, le=1.0),
+) -> CascadeSegmentationResponse:
+    if "detectors_v15" not in _state or "seg_v14" not in _state:
+        raise HTTPException(
+            status_code=503,
+            detail="v15 cascade not loaded. Need models/detector_v15_fold*.pth and "
+                   "models/best_model_slidingWindow_v14_fold0_f1.pth.",
+        )
+    file_bytes = await file.read()
+    _validate_upload(file, file_bytes)
+    try:
+        result = predict_cascade_from_bytes(
+            file_bytes,
+            _state["detectors_v15"], _state["det_device_v15"],
+            _state["seg_v14"], _state["seg_device_v14"],
+            case_threshold=case_threshold,
+            threshold=threshold,
+        )
+    except Exception as exc:
+        logger.exception("Prediction failed (/segment/sw_v15)")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {exc}") from exc
+    return CascadeSegmentationResponse(**result)
