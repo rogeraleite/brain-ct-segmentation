@@ -55,6 +55,7 @@ POLY_FILL_ALPHA = 0.18
 CLOSE_THRESHOLD_PX = 15  # native pixels — click this close to P1 to auto-close
 
 MODEL_OPTIONS = {
+    "v15 Detect-then-Segment — detection F1 0.83 · gates FP on healthy scans · ~20s": "/segment/sw_v15",
     "Sliding Window v8 — Dice 0.38 · ep132 · 3D skull excl · ~20s":             "/segment/sw_v8",
     "Sliding Window v7 — Dice ~0.30 · ep95 · ~20s":                             "/segment/sw_v7",
     "Sliding Window v6 — Dice ~0.28 · no-elastic · bone excl post-inf · ~20s":  "/segment/sw_v6",
@@ -64,6 +65,7 @@ MODEL_OPTIONS = {
 }
 
 MODEL_DEFAULT_THRESHOLD = {
+    "/segment/sw_v15":  0.30,
     "/segment/sw_v8":   0.30,
     "/segment/sw_v7":   0.30,
     "/segment/sw_v6":   0.30,
@@ -154,12 +156,12 @@ def load_volume(file_bytes: bytes, filename: str) -> tuple[np.ndarray, np.ndarra
 @st.cache_data(show_spinner="Running segmentation...")
 def call_segment_api(
     file_bytes: bytes, filename: str, api_url: str, endpoint: str,
-    threshold: float = 0.5,
+    threshold: float = 0.5, case_threshold: float = 0.5,
 ) -> dict:
     response = requests.post(
         f"{api_url}{endpoint}",
         files={"file": (filename, file_bytes, "application/octet-stream")},
-        params={"threshold": threshold},
+        params={"threshold": threshold, "case_threshold": case_threshold},
         timeout=180,
     )
     response.raise_for_status()
@@ -780,7 +782,7 @@ def build_3d_figure(
     lesion_mask: np.ndarray | None = None,
     show_lesion: bool = True,
 ) -> go.Figure:
-    """Render skull + brain (HU-based, clipped below slice) + CT texture at slice plane."""
+    """Render the prediction (dark red), ground truth (green), and current CT slice plane."""
     fig = go.Figure()
 
     W_mm = float(vol_shape[2]) * spacing[2]
@@ -788,66 +790,7 @@ def build_3d_figure(
     D_mm = float(vol_shape[0]) * spacing[0]
     z_mm = float(slice_idx) * spacing[0]
 
-    # 1. TS full-head shell (very transparent — just overall volume context)
-    if full_head_mesh is not None:
-        v, f = full_head_mesh
-        fig.add_trace(go.Mesh3d(
-            x=v[:, 2].tolist(), y=(H_mm - v[:, 1]).tolist(), z=v[:, 0].tolist(),
-            i=f[:, 0].tolist(), j=f[:, 1].tolist(), k=f[:, 2].tolist(),
-            color="#C8BAA0", opacity=0.07,
-            name="Volume (TS)", showlegend=True,
-            lighting=dict(ambient=0.8, diffuse=0.4, specular=0.05),
-        ))
-
-    # 2. HU skull — full mesh, semi-transparent shell
-    if "skull" in hu_meshes:
-        sv, sf = hu_meshes["skull"]
-        fig.add_trace(go.Mesh3d(
-            x=sv[:, 2].tolist(), y=(H_mm - sv[:, 1]).tolist(), z=sv[:, 0].tolist(),
-            i=sf[:, 0].tolist(), j=sf[:, 1].tolist(), k=sf[:, 2].tolist(),
-            color="#D4C5A0", opacity=0.18,
-            name="Skull (HU>400)", showlegend=True,
-            lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
-        ))
-
-    # 3. HU brain — full mesh, semi-transparent
-    if "brain" in hu_meshes:
-        bv, bf = hu_meshes["brain"]
-        fig.add_trace(go.Mesh3d(
-            x=bv[:, 2].tolist(), y=(H_mm - bv[:, 1]).tolist(), z=bv[:, 0].tolist(),
-            i=bf[:, 0].tolist(), j=bf[:, 1].tolist(), k=bf[:, 2].tolist(),
-            color="#E8A4A4", opacity=0.40,
-            name="Brain (HU 20–80)", showlegend=True,
-            lighting=dict(ambient=0.6, diffuse=0.8, specular=0.2),
-        ))
-
-    # 4. Ground truth lesion mesh — green surface
-    if show_gt and gt_mask is not None:
-        gt_result = compute_mesh(gt_mask, spacing)
-        if gt_result is not None:
-            gv, gf = gt_result
-            fig.add_trace(go.Mesh3d(
-                x=gv[:, 2].tolist(), y=(H_mm - gv[:, 1]).tolist(), z=gv[:, 0].tolist(),
-                i=gf[:, 0].tolist(), j=gf[:, 1].tolist(), k=gf[:, 2].tolist(),
-                color="#00C850", opacity=0.70,
-                name="Ground truth", showlegend=True,
-                lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
-            ))
-
-    # 5. Model lesion prediction — red surface (uses bone-excluded mask_filtered)
-    if show_lesion and lesion_mask is not None and lesion_mask.any():
-        lesion_result = compute_mesh(lesion_mask, spacing)
-        if lesion_result is not None:
-            lv, lf = lesion_result
-            fig.add_trace(go.Mesh3d(
-                x=lv[:, 2].tolist(), y=(H_mm - lv[:, 1]).tolist(), z=lv[:, 0].tolist(),
-                i=lf[:, 0].tolist(), j=lf[:, 1].tolist(), k=lf[:, 2].tolist(),
-                color="#DC3232", opacity=0.85,
-                name="Prediction", showlegend=True,
-                lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
-            ))
-
-    # 6. CT slice — actual scan image as the cutting plane surface
+    # Current CT slice — actual scan image as a plane at the selected depth.
     if volume is not None:
         slc = volume[slice_idx].astype(np.float32)
         slc_win = np.clip(slc, BRAIN_HU_MIN, BRAIN_HU_MAX)
@@ -866,6 +809,33 @@ def build_3d_figure(
             colorscale="Gray", showscale=False,
             opacity=1.0, name=f"Slice {slice_idx}", showlegend=True,
         ))
+
+    # Model lesion prediction — dark red surface. Drawn FIRST so the green
+    # ground truth (added after) renders on top and is never occluded by it.
+    if show_lesion and lesion_mask is not None and lesion_mask.any():
+        lesion_result = compute_mesh(lesion_mask, spacing)
+        if lesion_result is not None:
+            lv, lf = lesion_result
+            fig.add_trace(go.Mesh3d(
+                x=lv[:, 2].tolist(), y=(H_mm - lv[:, 1]).tolist(), z=lv[:, 0].tolist(),
+                i=lf[:, 0].tolist(), j=lf[:, 1].tolist(), k=lf[:, 2].tolist(),
+                color="#DC3232", opacity=0.85,
+                name="Prediction", showlegend=True,
+                lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
+            ))
+
+    # Ground truth lesion mesh — green surface, drawn LAST (on top).
+    if show_gt and gt_mask is not None:
+        gt_result = compute_mesh(gt_mask, spacing)
+        if gt_result is not None:
+            gv, gf = gt_result
+            fig.add_trace(go.Mesh3d(
+                x=gv[:, 2].tolist(), y=(H_mm - gv[:, 1]).tolist(), z=gv[:, 0].tolist(),
+                i=gf[:, 0].tolist(), j=gf[:, 1].tolist(), k=gf[:, 2].tolist(),
+                color="#00C850", opacity=0.70,
+                name="Ground truth", showlegend=True,
+                lighting=dict(ambient=0.6, diffuse=0.8, specular=0.3),
+            ))
 
     fig.update_layout(
         scene=dict(
@@ -993,20 +963,36 @@ with st.sidebar:
             help="Probability cutoff for binarising model output. Lower values show more (weaker) predictions.",
         )
 
+        is_v15 = endpoint == "/segment/sw_v15"
+        case_threshold = 0.5
+        if is_v15:
+            case_threshold = st.slider(
+                "Detector gate threshold (case-level)", 0.05, 0.95, step=0.05, value=0.5,
+                key="_case_thresh_val",
+                help="Stage-1 gate: if the scan's hemorrhage probability is below this, "
+                     "segmentation is suppressed and the scan is reported lesion-free. "
+                     "Lower = catch more (higher recall), fewer suppressions.",
+            )
+
         if st.button("Run Segmentation", type="primary"):
             st.session_state.pop("seg_result", None)
             st.session_state.pop("seg_endpoint", None)
             st.session_state.pop("seg_threshold", None)
+            st.session_state.pop("seg_case_threshold", None)
             call_segment_api.clear()
 
-        _threshold_changed = st.session_state.get("seg_threshold") != seg_threshold
+        _threshold_changed = (
+            st.session_state.get("seg_threshold") != seg_threshold
+            or st.session_state.get("seg_case_threshold") != case_threshold
+        )
         if "seg_result" not in st.session_state or st.session_state.get("seg_endpoint") != endpoint or _threshold_changed:
-            log(f"Calling API: {api_url}{endpoint} threshold={seg_threshold}")
+            log(f"Calling API: {api_url}{endpoint} threshold={seg_threshold} case_threshold={case_threshold}")
             try:
-                result = call_segment_api(file_bytes, filename, api_url, endpoint, seg_threshold)
+                result = call_segment_api(file_bytes, filename, api_url, endpoint, seg_threshold, case_threshold)
                 st.session_state["seg_result"] = result
                 st.session_state["seg_endpoint"] = endpoint
                 st.session_state["seg_threshold"] = seg_threshold
+                st.session_state["seg_case_threshold"] = case_threshold
                 log(f"API OK — lesion: {result['lesion_volume_ml']:.3f} mL · {result['hemisphere']}")
             except requests.exceptions.ConnectionError:
                 msg = f"API not found at {api_url}"
@@ -1023,6 +1009,25 @@ with st.sidebar:
         if "seg_result" in st.session_state:
             seg_result = st.session_state["seg_result"]
             mask_full = decode_mask(seg_result, volume.shape)
+
+            # ── v15 detect-then-segment banner ─────────────────────────────
+            if "hemorrhage_detected" in seg_result:
+                p = seg_result["case_probability"]
+                ct = seg_result["case_threshold"]
+                if seg_result["hemorrhage_detected"]:
+                    st.error(
+                        f"🔴 **Hemorrhage detected** — case probability "
+                        f"**{p:.0%}** ≥ gate {ct:.0%}. Running segmentation.",
+                        icon="🩸",
+                    )
+                else:
+                    st.success(
+                        f"🟢 **No hemorrhage detected** — case probability "
+                        f"**{p:.0%}** < gate {ct:.0%}. Segmentation suppressed "
+                        f"(scan reported lesion-free — no false positives invented).",
+                        icon="✅",
+                    )
+
             st.caption(
                 f"Model: {seg_result.get('model_version', 'v1.0')} · "
                 f"endpoint: `{endpoint}`"
@@ -1055,6 +1060,37 @@ with st.sidebar:
         if "innerskull_mask" not in st.session_state:
             st.session_state["innerskull_mask"] = ~_extracranial_mask(volume, _SKULL_HU_THRESH)
             st.session_state["bone_mask"] = (volume > _SKULL_HU_THRESH).astype(bool)
+
+        # ── v15 per-slice detector confidence bar ──────────────────────────
+        _seg = st.session_state.get("seg_result", {})
+        if _seg.get("slice_probabilities"):
+            sp = _seg["slice_probabilities"]
+            ct = _seg.get("case_threshold", 0.5)
+            det_colors = [
+                "rgba(220,50,50,0.9)" if v >= ct else "rgba(80,140,220,0.55)"
+                for v in sp
+            ]
+            fig_det = go.Figure()
+            fig_det.add_bar(x=list(range(len(sp))), y=sp, marker_color=det_colors)
+            fig_det.add_hline(y=ct, line_color="rgba(255,255,255,0.5)", line_width=1, line_dash="dot")
+            fig_det.add_vline(x=slice_idx, line_color="yellow", line_width=1.5)
+            fig_det.update_layout(
+                height=64,
+                margin=dict(l=0, r=0, t=2, b=2),
+                showlegend=False,
+                xaxis=dict(showticklabels=False, showgrid=False, zeroline=False),
+                yaxis=dict(range=[0, 1], showticklabels=False, showgrid=False, zeroline=False),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(
+                fig_det, use_container_width=True,
+                config={"displayModeBar": False}, key="det_sparkline",
+            )
+            st.caption(
+                "Stage-1 detector confidence per slice · Red = above gate · "
+                "Dotted line = gate threshold · Yellow = current slice"
+            )
 
         if mask_full is not None:
             per_slice = mask_full.sum(axis=(1, 2))
